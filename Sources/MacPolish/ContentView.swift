@@ -101,9 +101,12 @@ private struct SidebarView: View {
         }
         .safeAreaInset(edge: .top) {
             HStack(spacing: 10) {
-                Image(nsImage: NSApplication.shared.applicationIconImage)
+                Image(nsImage: Bundle.main.url(forResource: "AppIcon", withExtension: "icns")
+                    .flatMap { NSImage(contentsOf: $0) } ?? NSApplication.shared.applicationIconImage)
                     .resizable().scaledToFit()
+                    .scaleEffect(1.25)
                     .frame(width: 44, height: 44)
+                    .clipped()
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Mac Polish")

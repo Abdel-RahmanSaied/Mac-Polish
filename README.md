@@ -19,7 +19,7 @@
 للأجهزة بمعالج Apple Silicon (M1 أو أحدث)، على macOS 14 أو أحدث:
 
 ```sh
-curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.7.1/install.sh | bash
+curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.7.2/install.sh | bash
 ```
 
 يمكنك تنزيل السكريبت ومراجعته قبل تشغيله. يتحقق من SHA-256 والتوقيع المحلي، ويثبت التطبيق داخل `~/Applications` بدون sudo. أغلق التطبيق قبل تحديثه؛ يحتفظ المثبّت بنسخة من التثبيت السابق. للتحقق من التحميل فقط دون التثبيت، شغّل السكريبت باستخدام `bash install.sh --verify-only`.

@@ -1,6 +1,6 @@
 # Mac Polish app icon
 
-Generated with the built-in image_gen tool. Master: AppIcon.png, with transparent margins. AppIcon.iconset contains the macOS 1x and 2x sizes; AppIcon.icns is copied into the app bundle by Scripts/build-app.sh. CFBundleIconFile selects it for Finder, Dock and application panels. The sidebar reads the running application's icon.
+Generated with the built-in image_gen tool. Master: AppIcon.png, with transparent margins. AppIcon.iconset contains the macOS 1x and 2x sizes; AppIcon.icns is copied into the app bundle by Scripts/build-app.sh. CFBundleIconFile selects it for Finder, Dock and application panels. The sidebar loads the raw icon resource to avoid the system's legacy-icon frame, and scales it by 1.25 to fill its 44-point slot without the Dock artwork's transparent margins.
 
 Final generation prompt:
 
