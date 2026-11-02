@@ -1,0 +1,193 @@
+import Foundation
+
+enum SidebarDestination: String, CaseIterable, Identifiable {
+    case overview = "Overview"
+    case optimize = "Optimize"
+    case cleanup = "Cleanup"
+    case largeFiles = "Large Files"
+    case duplicates = "Duplicates"
+    case storage = "Storage Map"
+    case systemData = "System Data"
+    case developer = "Developer Cleanup"
+    case oldFiles = "Old Files"
+    case applications = "Applications"
+    case startup = "Startup Items"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .overview: "sparkles"
+        case .optimize: "wand.and.stars.inverse"
+        case .cleanup: "wand.and.stars"
+        case .largeFiles: "externaldrive"
+        case .duplicates: "doc.on.doc"
+        case .storage: "chart.pie"
+        case .systemData: "internaldrive"
+        case .developer: "hammer"
+        case .oldFiles: "clock.arrow.circlepath"
+        case .applications: "square.grid.2x2"
+        case .startup: "bolt.circle"
+        }
+    }
+}
+
+enum ScanCategory: String, CaseIterable, Hashable, Sendable {
+    case cache = "Application Caches"
+    case logs = "Old Logs"
+    case trash = "Trash"
+    case largeFile = "Large Files"
+    case derivedData = "Xcode Derived Data"
+    case xcodeCache = "Xcode Caches"
+    case xcodeArchive = "Xcode Archives"
+    case deviceSupport = "Old Device Support"
+    case simulatorCache = "Simulator Caches"
+    case oldXcode = "Old Xcode Copies"
+    case xcodeDownload = "Xcode Installers"
+    case diagnostics = "Diagnostic Reports"
+    case deviceBackup = "Device Backups"
+    case oldInstaller = "macOS Installers"
+
+    var icon: String {
+        switch self {
+        case .cache: "shippingbox"
+        case .logs: "doc.text.magnifyingglass"
+        case .trash: "trash"
+        case .largeFile: "doc.badge.ellipsis"
+        case .derivedData: "hammer"
+        case .xcodeCache: "shippingbox"
+        case .xcodeArchive: "archivebox"
+        case .deviceSupport: "iphone"
+        case .simulatorCache: "desktopcomputer"
+        case .oldXcode: "hammer.circle"
+        case .xcodeDownload: "arrow.down.app"
+        case .diagnostics: "waveform.path.ecg"
+        case .deviceBackup: "externaldrive.badge.timemachine"
+        case .oldInstaller: "macwindow.badge.plus"
+        }
+    }
+
+    var tintName: String {
+        switch self {
+        case .cache: "blue"
+        case .logs: "orange"
+        case .trash: "pink"
+        case .largeFile: "purple"
+        case .derivedData, .xcodeCache, .simulatorCache: "blue"
+        case .xcodeArchive, .deviceSupport, .oldXcode, .xcodeDownload: "indigo"
+        case .diagnostics: "orange"
+        case .deviceBackup, .oldInstaller: "pink"
+        }
+    }
+}
+
+struct ScanItem: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let url: URL
+    let size: Int64
+    let category: ScanCategory
+    let modifiedAt: Date?
+    var isSelected: Bool
+
+    init(
+        id: UUID = UUID(),
+        url: URL,
+        size: Int64,
+        category: ScanCategory,
+        modifiedAt: Date?,
+        isSelected: Bool = true
+    ) {
+        self.id = id
+        self.url = url
+        self.size = size
+        self.category = category
+        self.modifiedAt = modifiedAt
+        self.isSelected = isSelected
+    }
+
+    var displayName: String {
+        let name = url.lastPathComponent
+        return name.isEmpty ? url.path : name
+    }
+}
+
+enum ScanState: Equatable {
+    case idle
+    case scanning
+    case finished
+    case cleaning
+    case failed(String)
+}
+
+enum ModuleState: Equatable {
+    case idle
+    case loading
+    case ready
+    case failed(String)
+}
+
+struct ApplicationItem: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let name: String
+    let url: URL
+    let bundleIdentifier: String?
+    let version: String?
+    let size: Int64
+    let leftoverURLs: [URL]
+    let leftoverSize: Int64
+    let canRemove: Bool
+    var isSelected: Bool
+
+    var totalSize: Int64 { size + leftoverSize }
+}
+
+struct DuplicateFile: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let url: URL
+    let size: Int64
+    let fingerprint: String
+    var isSelected: Bool
+}
+
+struct DuplicateGroup: Identifiable, Sendable {
+    let id: String
+    let files: [DuplicateFile]
+
+    var fileSize: Int64 { files.first?.size ?? 0 }
+    var reclaimableSize: Int64 { fileSize * Int64(max(0, files.count - 1)) }
+}
+
+struct StorageEntry: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let name: String
+    let url: URL
+    let size: Int64
+}
+
+struct StartupEntry: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let label: String
+    let url: URL
+    let program: String?
+    let runsAtLoad: Bool
+    let requiresAdministrator: Bool
+}
+
+struct ApplicationRemovalResult: Sendable {
+    let removedIDs: Set<UUID>
+    let reclaimedBytes: Int64
+    let failures: [String]
+}
+
+struct CleanupResult: Sendable {
+    let removedCount: Int
+    let reclaimedBytes: Int64
+    let failures: [String]
+    let removedItemIDs: Set<UUID>
+}
+
+extension Int64 {
+    var formattedBytes: String {
+        ByteCountFormatter.string(fromByteCount: self, countStyle: .file)
+    }
+}
