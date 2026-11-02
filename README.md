@@ -1,53 +1,175 @@
 # Mac Polish
 
-Mac Polish is a native macOS cleanup utility built with SwiftUI. The first milestone focuses on transparent, reversible cleanup rather than hidden “one-click” deletion.
+تطبيق شخصي لـmacOS يساعدك تفهم المساحة المستخدمة على جهازك، تكتشف الملفات الكبيرة والمكررة، وتراجع اقتراحات التنظيف قبل تنفيذها. مكتوب بـSwiftUI ويعمل محليًا.
 
-## Current features
+## إيه لازمته؟
 
-- Scans application caches, logs, and the current user's Trash.
-- Finds files larger than 100 MB in Downloads, Documents, and Desktop.
-- Shows every result and its exact location before cleanup.
-- Never preselects personal large files.
-- Moves selected items to Trash instead of deleting them permanently.
-- Enforces a path allowlist inside the cleanup engine.
-- Finds true duplicate files using streamed SHA-256 hashing.
-- Audits installed applications, versions, sizes, and related user-library leftovers.
-- Protects built-in macOS applications from removal.
-- Maps storage usage across the main home folders.
-- Audits user and system launch agents and daemons.
-- Finds Xcode DerivedData older than 30 days and regenerable Xcode/Simulator caches.
-- Lists Xcode archives and device-support folders older than 180 days for manual review.
-- Detects extra installed Xcode copies while always keeping the newest version unselected.
-- Detects old Xcode `.xip`/`.dmg` downloads, macOS installers, diagnostics, and device backups.
+- معرفة أين تذهب مساحة القرص، خصوصًا بيانات Docker وClaude وCursor وأدوات التطوير.
+- جمع اقتراحات التنظيف في صفحة **Optimize** واحدة.
+- اكتشاف الكاش والسجلات القديمة وملفات Xcode التي قد لا تحتاجها.
+- العثور على الملفات الكبيرة والنسخ المتطابقة.
+- مراجعة التطبيقات وبياناتها المرتبطة وعناصر التشغيل في الخلفية.
 
-## Run locally
+الهدف الأساسي هو استعادة مساحة وفهم التخزين. التطبيق لا يضمن تسريع الجهاز؛ حذف الكاش قد يجعل بعض المهام أبطأ مؤقتًا أثناء إعادة إنشائه.
 
-Requirements: macOS 14 or later and Swift 6.
+## المتطلبات والتشغيل
+
+- macOS 14 أو أحدث.
+- للبناء من المصدر: Swift 6 وأدوات Apple للتطوير.
+- لتفاصيل Docker وتنظيف كاش بنائه: Docker Desktop يعمل وDocker CLI متاح.
+
+من Terminal:
+
+```sh
+cd /Users/asaied/WorkDir/Mac-polish
+./Scripts/build-app.sh
+open "dist/Mac Polish.app"
+```
+
+التطبيق الناتج موجود في `/Users/asaied/WorkDir/Mac-polish/dist/Mac Polish.app` ويمكن فتحه من Finder. بعد تحديث الكود، أعد البناء ثم أغلق النسخة المفتوحة وافتح التطبيق الجديد.
+
+للتشغيل أثناء التطوير:
 
 ```sh
 swift run MacPolish
 ```
 
-If the window does not come forward when launched through Swift Package Manager,
-build a normal macOS application bundle instead:
+إذا لم تظهر النافذة، استخدم نسخة التطبيق داخل `dist`. سكريبت البناء يستخدم توقيعًا محليًا ad-hoc؛ هذا ليس توقيع Developer ID أو اعتماد notarization للنشر العام.
+
+## بداية سريعة: Optimize
+
+1. افتح **Optimize** من القائمة الجانبية أو الصفحة الرئيسية.
+2. اضغط **Scan My Mac** وانتظر اكتمال الفحص.
+3. راجع أسماء الملفات ومساراتها وأحجامها وألغِ تحديد ما تريد الاحتفاظ به.
+4. اختياريًا، فعّل **Also clean Docker build cache**.
+5. أغلق التطبيقات التي ستنظّف كاشها، ثم اضغط **Optimize Now** وراجع التأكيد.
+6. بعد التنفيذ، راجع النتائج وأي عناصر تم تخطيها أو فشل تنظيفها.
+
+الفحص الشامل يقيس الأجزاء القابلة للقراءة من قرص البيانات الداخلي. بعض المجلدات محمية ويوجد حد زمني للقياس؛ لذلك قد تظهر نتيجة جزئية **Partial**. الأقراص الخارجية غير مشمولة.
+
+اقتراحات التنفيذ تركز على فئات الكاش والسجلات التي يزيد عمر آخر تعديل لها عن 7 أيام، مع استثناءات لبعض مسارات الأدوات والمكتبات المُدارة. العمر مؤشر للمراجعة، وليس إثباتًا أن الملف غير مستخدم.
+
+Optimize لا يزيل التطبيقات أو الملفات الشخصية الكبيرة أو النسخ الاحتياطية أو قواعد بيانات النظام تلقائيًا. يعيد التحقق من المسار وتاريخ التعديل قبل التنفيذ ويتخطى العناصر التي تغيّرت أو اختفت.
+
+## أقسام التطبيق
+
+| القسم | وظيفته وطريقة استخدامه |
+|---|---|
+| **Overview** | ملخص الفحص وروابط الأدوات؛ Scan My Mac للفحص المعتاد وOptimize للخطة المجمّعة |
+| **Cleanup** | كاش التطبيقات والسجلات وعناصر Trash المتاحة؛ ابحث بالاسم أو المسار وراجع الاختيارات قبل Move Selected to Trash |
+| **Large Files** | ملفات أكبر من 100 MB في Downloads وDocuments وDesktop؛ الاختيار يدوي |
+| **Duplicates** | مطابقة الملفات باستخدام SHA-256؛ حدد نسخًا بعينها أو استخدم Remove All Duplicates |
+| **Storage Map** | أحجام المجلدات الرئيسية؛ استخدم Show in Finder لاستكشاف الموقع |
+| **System Data** | تفصيل مواقع كبيرة مثل Docker وبيانات التطبيقات والكاش وSwap؛ افتح الأقسام أو اضغط Refresh |
+| **Developer Cleanup** | كاش وملفات بناء وتثبيت Xcode؛ راجع نوع كل عنصر قبل التنظيف |
+| **Old Files** | تقارير أعطال قديمة ونسخ أجهزة احتياطية ومثبتات macOS |
+| **Applications** | أحجام التطبيقات وإصداراتها وبعض بياناتها المرتبطة؛ البحث ثم Uninstall Selected بعد المراجعة |
+| **Startup Items** | عرض Launch Agents وDaemons؛ Reveal يعرض الملف، ولا يوجد تعطيل للخدمات حاليًا |
+
+زر **Show in Finder / Reveal** يعرض موقع العنصر ولا يحذفه.
+
+## System Data وتنظيف Docker
+
+القياسات لمواقع محددة وليست نسخة مطابقة لتصنيف Storage في macOS. بعض المواقع محجوبة أو غير مثبتة، وبعض بيانات التطبيقات والـSnapshots ليست ضمن القياس.
+
+تُعرض المساحة الفعلية المخصصة على القرص، وأكبر المجلدات الفرعية، وتفاصيل Docker Desktop المحلي. أرقام Docker الداخلية جزء من قرصه الافتراضي؛ لا تجمعها مجددًا مع إجمالي المواقع.
+
+لتنظيف كاش البناء:
+
+1. افتح **System Data** وانتظر النتائج.
+2. اضغط **Clean Docker Build Cache**.
+3. راجع التأكيد ثم اختر **Clean Build Cache**.
+4. انتظر رسالة النتيجة وتحديث الأحجام.
+
+العملية تستهدف builder باسم `desktop-linux` داخل سياق Docker Desktop المحلي. تحذف كاش البناء غير المستخدم بشكل دائم ولا تستهدف الـVolumes أو قواعد بيانات المشاريع. البناء التالي قد يستغرق وقتًا أطول.
+
+تنظيف Docker لا يستخدم Trash. Docker يعيد إنشاء الكاش عند الحاجة، لكن لا يمكن استرجاع الكاش المحذوف من السلة. مقدار المساحة الذي يظهر فورًا في macOS قد يختلف عن الرقم الذي يعلنه Docker.
+
+## الملفات المكررة
+
+الفحص يبحث في Downloads وDocuments وDesktop وPictures، ويتخطى الملفات الأصغر من 1 MB والملفات المخفية ومحتويات بعض الحزم.
+
+- **Select extras** يحدد النسخ الزائدة داخل مجموعة.
+- **Move Selected to Trash** ينقل الاختيارات بعد التأكيد، مع الاحتفاظ بنسخة واحدة على الأقل لكل مجموعة.
+- **Remove All Duplicates** يجهّز اختيار النسخ الزائدة عبر كل المجموعات ثم يعرض تأكيدًا. يحتفظ بالمسار الأول أبجديًا؛ يمكنك إلغاء التأكيد لتغيير الاختيارات.
+
+تطابق المحتوى لا يعني أن النسخ قابلة للاستبدال في كل استخدام؛ ملفات المكتبات قد تكون مطلوبة في مسارات مشاريع مختلفة.
+
+**قيد معروف:** الفحص العام قد يعرض ملفات داخل مكتبات مُدارة مثل `gomodcache`. لا تستخدم الحذف الجماعي على هذه النتائج؛ تنظيفها يجب أن يتم بأداة إدارة الحزم المناسبة. قد تفشل محاولة نقلها لأن المجلد للقراءة فقط.
+
+## ملفات Xcode والملفات القديمة
+
+Developer Cleanup يعرض:
+
+- DerivedData الأقدم من 30 يومًا.
+- كاش Xcode وSwiftPM وSimulator.
+- Archives وDeviceSupport الأقدم من 180 يومًا.
+- نسخ Xcode الإضافية في Applications، مع استبعاد الأعلى رقمًا في الإصدار من اقتراح النسخ القديمة.
+- مثبتات Xcode بصيغة `.xip` و`.dmg` في Downloads، الأقدم من 30 يومًا.
+
+Old Files يعرض تقارير الأعطال الأقدم من 30 يومًا، ونسخ iPhone/iPad الاحتياطية الأقدم من 180 يومًا، ومثبتات macOS المطابقة في Applications.
+
+الـArchives والـBackups ونسخ Xcode والمثبتات لا تُحدد تلقائيًا. تاريخ المجلد أو رقم إصدار Xcode لا يثبت أنه غير مستخدم. اكتشاف النسخ القديمة لا يتحقق حاليًا من نسخة Xcode النشطة عبر xcode-select.
+
+## حذف التطبيقات
+
+صفحة Applications تعرض حجم التطبيق وبعض المسارات المرتبطة به بالاسم أو Bundle ID. التطبيقات داخل System/Applications محمية من الاختيار.
+
+**Uninstall Selected** ينقل التطبيق والمسارات المرتبطة المكتشفة إلى Trash بعد التأكيد. قد تشمل إعدادات وبيانات مستخدم أو بيئة افتراضية كاملة؛ ليست كلها كاشًا زائدًا. أغلق التطبيق واحتفظ بنسخة من بياناته المهمة قبل إزالته.
+
+الكشف تقديري وغير شامل لكل تطبيق، وقد تفشل بعض الخطوات بسبب الصلاحيات. راجع نتيجة العملية.
+
+## الحذف والمساحة المسترجعة
+
+- تنظيف الملفات وحذف التطبيقات والمكررات يستخدم Trash.
+- نقل الملف إلى Trash لا يحرر مساحته عادةً حتى إفراغ السلة.
+- يمكن استعادة الملفات من Trash ما دامت لم تُفرغ.
+- التطبيق لا يفرغ Trash تلقائيًا؛ عرض عناصر فيها لا يعني حذفها نهائيًا.
+- تنظيف كاش Docker استثناء: حذف دائم بواسطة Docker بعد التأكيد.
+- الحجم المكتشف أو المنقول ليس ضمانًا للمساحة التي ستعود فورًا، خصوصًا مع APFS والأقراص الافتراضية.
+
+## مشاكل شائعة
+
+### Permission denied أو Operation not permitted
+
+قد يكون السبب حماية macOS، أو صلاحيات الملف ومجلده، أو كون المجلد للقراءة فقط. Full Disk Access لا يتجاوز صلاحيات الملفات العادية. لا تغيّر صلاحيات مجلدات النظام أو مكتبات المشاريع عشوائيًا.
+
+### أرقام Storage مختلفة عن التطبيق
+
+تصنيف macOS قد يتأخر في التحديث ويضم عناصر لا يقيسها التطبيق. راجع وقت الفحص وعلامة Partial، ثم اضغط Refresh.
+
+### Docker details unavailable
+
+شغّل Docker Desktop وتأكد من توفر Docker CLI وسياق `desktop-linux` ثم اضغط Refresh. قياس مجلد Docker قد يظل متاحًا حتى لو تعذر الاتصال بالخدمة.
+
+### Optimize Now غير مفعّل
+
+انتظر انتهاء الفحص وتأكد من وجود عناصر محددة أو اختيار تنظيف كاش Docker. بعد إكمال الخطة، أعد الفحص لتجهيز خطة جديدة.
+
+### تحذيرات search path أثناء البناء
+
+قد تظهر مع بعض تثبيتات أدوات Apple. إذا انتهى البناء برسالة Build complete وتم إنشاء التطبيق، فالتحذيرات لم تمنع البناء. راجع إعداد أدوات التطوير إذا ظهر خطأ فعلي.
+
+## حدود النسخة الحالية
+
+- النسخة قيد التطوير للاستخدام الشخصي، وليست بديلًا للنسخ الاحتياطي.
+- لا يوجد محرك مكافحة برمجيات خبيثة أو مراقبة حرارة وأداء.
+- لا يوجد Helper إداري؛ العمليات تعمل بصلاحيات المستخدم.
+- Startup Items للفحص فقط، وليس إدارة كاملة لكل أنواع Login Items.
+- Storage Map عرض أحجام مجلدات رئيسية، وليس خريطة تفاعلية لكل ملف.
+- بعض الفحوصات تتخطى المسارات غير المقروءة والملفات المخفية والحزم؛ النتائج ليست جردًا كاملًا للجهاز.
+
+## للمطور
+
+للمساهمة بإصلاح أو ميزة أو تحسين للتوثيق، اقرأ [دليل المساهمة CONTRIBUTING.md](CONTRIBUTING.md).
+
+- `Sources/MacPolish`: الواجهة ومحركات الفحص والتنظيف.
+- `Resources/Info.plist`: معلومات تطبيق macOS.
+- `Scripts/build-app.sh`: بناء نسخة release وتجميع التطبيق.
+- `Tests`: اختبارات تحقق مستقلة لاختيار المكررات وسياسة Optimize، وليست حزمة اختبارات شاملة.
+
+لبناء الكود فقط:
 
 ```sh
-./Scripts/build-app.sh
-open "dist/Mac Polish.app"
+swift build
 ```
-
-## Safety model
-
-The cleanup engine only accepts descendants of these user-owned directories:
-
-- `~/Library/Caches`
-- `~/Library/Logs`
-- `~/.Trash`
-- `~/Downloads`
-- `~/Documents`
-- `~/Desktop`
-- `~/Pictures`
-
-The roots themselves are blocked. System directories and paths outside this list are rejected.
-
-> This machine currently has the Swift command-line toolchain rather than the full Xcode installation. Install Xcode to create a signed `.app`, add UI tests, and prepare the product for notarization.
