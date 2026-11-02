@@ -14,6 +14,20 @@
 
 ## المتطلبات والتشغيل
 
+### تثبيت الإصدار الجاهز
+
+للأجهزة بمعالج Apple Silicon (M1 أو أحدث)، على macOS 14 أو أحدث:
+
+```sh
+curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.3.0/install.sh | bash
+```
+
+يمكنك تنزيل السكريبت ومراجعته قبل تشغيله. يتحقق من SHA-256 والتوقيع المحلي، ويثبت التطبيق داخل `~/Applications` بدون sudo. أغلق التطبيق قبل تحديثه؛ يحتفظ المثبّت بنسخة من التثبيت السابق. للتحقق من التحميل فقط دون التثبيت، شغّل السكريبت باستخدام `bash install.sh --verify-only`.
+
+النسخة موقعة محليًا وغير معتمدة من Apple عبر notarization؛ قد يطلب macOS السماح بتشغيلها من Privacy & Security. المثبّت لا يعطّل حماية النظام. الحزمة الحالية لا تدعم Intel.
+
+### البناء من المصدر
+
 - macOS 14 أو أحدث.
 - للبناء من المصدر: Swift 6 وأدوات Apple للتطوير.
 - لتفاصيل Docker وتنظيف كاش بنائه: Docker Desktop يعمل وDocker CLI متاح.
