@@ -2,13 +2,24 @@ import AppKit
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var mainWindow: NSWindow?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
         DispatchQueue.main.async {
             NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+            self.mainWindow = NSApp.windows.first(where: { $0.canBecomeMain })
+            self.mainWindow?.isReleasedWhenClosed = false
+            self.mainWindow?.makeKeyAndOrderFront(nil)
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            mainWindow?.makeKeyAndOrderFront(nil)
+            sender.activate(ignoringOtherApps: true)
+        }
+        return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

@@ -19,7 +19,7 @@
 للأجهزة بمعالج Apple Silicon (M1 أو أحدث)، على macOS 14 أو أحدث:
 
 ```sh
-curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.6.0/install.sh | bash
+curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.6.1/install.sh | bash
 ```
 
 يمكنك تنزيل السكريبت ومراجعته قبل تشغيله. يتحقق من SHA-256 والتوقيع المحلي، ويثبت التطبيق داخل `~/Applications` بدون sudo. أغلق التطبيق قبل تحديثه؛ يحتفظ المثبّت بنسخة من التثبيت السابق. للتحقق من التحميل فقط دون التثبيت، شغّل السكريبت باستخدام `bash install.sh --verify-only`.
@@ -210,3 +210,5 @@ Settings can disable automatic checks or preview releases (enabled by default fo
 - يوضح تعذّر الوصول، انتهاء مهلة الفحص، أو اختفاء المسار بدل اعتبار المجلد فارغًا. عند تقييد الوصول، راجع Full Disk Access للتطبيق ثم أعد الفحص.
 - يتوقف اقتراح تنظيف Docker build cache عندما يكون حجمه صفرًا أو غير معروف. أحجام Images وVolumes لا تُستخدم لتفعيل هذا الإجراء.
 - يبدأ كل فحص بخطة جديدة، ولا يعرض اقتراحات الفحص السابق أثناء العمل.
+
+الإصدار 0.6.1 يعيد فتح النافذة الرئيسية عند فتح التطبيق من Finder أو Dock بعد إغلاق آخر نافذة، مع استمرار متابعة الذاكرة في الخلفية.
