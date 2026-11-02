@@ -8,7 +8,7 @@ APP="$PROJECT_ROOT/dist/Mac Polish.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 ARCHIVE="Mac-Polish-${VERSION}-macos-arm64.zip"
 codesign --verify --deep --strict "$APP"
-lipo -verify_arch arm64 "$APP/Contents/MacOS/MacPolish"
+lipo "$APP/Contents/MacOS/MacPolish" -verify_arch arm64
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$PROJECT_ROOT/dist/$ARCHIVE"
 cp Scripts/install.sh dist/install.sh
 cd dist

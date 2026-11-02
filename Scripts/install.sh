@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Pinned release: review this script before running it.
-VERSION="0.5.0"
+VERSION="0.5.1"
 REPOSITORY="Abdel-RahmanSaied/Mac-Polish"
 ASSET="Mac-Polish-${VERSION}-macos-arm64.zip"
 BASE_URL="https://github.com/${REPOSITORY}/releases/download/v${VERSION}"
@@ -38,7 +38,7 @@ codesign --verify --deep --strict "$APP"
 IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
 BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 [ "$IDENTIFIER" = "com.asaied.macpolish" ] && [ "$BUNDLE_VERSION" = "$VERSION" ] || { echo "Unexpected application identity or version." >&2; exit 1; }
-lipo -verify_arch arm64 "$APP/Contents/MacOS/MacPolish"
+lipo "$APP/Contents/MacOS/MacPolish" -verify_arch arm64
 echo "Download, checksum, application signature and architecture verified."
 if [ "$VERIFY_ONLY" = true ]; then exit 0; fi
 
