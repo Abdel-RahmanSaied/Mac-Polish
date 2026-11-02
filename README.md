@@ -19,7 +19,7 @@
 للأجهزة بمعالج Apple Silicon (M1 أو أحدث)، على macOS 14 أو أحدث:
 
 ```sh
-curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.4.0/install.sh | bash
+curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.5.0/install.sh | bash
 ```
 
 يمكنك تنزيل السكريبت ومراجعته قبل تشغيله. يتحقق من SHA-256 والتوقيع المحلي، ويثبت التطبيق داخل `~/Applications` بدون sudo. أغلق التطبيق قبل تحديثه؛ يحتفظ المثبّت بنسخة من التثبيت السابق. للتحقق من التحميل فقط دون التثبيت، شغّل السكريبت باستخدام `bash install.sh --verify-only`.
@@ -195,3 +195,9 @@ Old Files يعرض تقارير الأعطال الأقدم من 30 يومًا،
 ```sh
 swift build
 ```
+
+## Update notifications (v0.5.0+)
+
+Mac Polish checks public GitHub releases on startup and every 6 hours while running. A **View Update** banner appears when a newer version has an uploaded Apple Silicon package. **Check for Updates** is also available in Settings, the app menu, and the menu bar panel.
+
+Settings can disable automatic checks or preview releases (enabled by default for this personal preview). Requests go to GitHub without file contents or scan results. Network failures show a retryable status. The update button opens the release page; installation remains manual. Users of v0.4.0 must manually install v0.5.0 or later once to receive future update notices.

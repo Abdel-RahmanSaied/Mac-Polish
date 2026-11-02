@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct MacPolishApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
+    @Environment(\.openSettings) private var openSettings
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -27,9 +28,18 @@ struct MacPolishApp: App {
                 .environmentObject(model)
                 .frame(minWidth: 1_050, minHeight: 680)
                 .task { model.memory.start() }
+                .task { model.updates.start() }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1_180, height: 760)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await model.updates.check() }
+                    openSettings()
+                }
+            }
+        }
 
         MenuBarExtra {
             MemoryMenu(model: model, monitor: model.memory)
@@ -41,7 +51,7 @@ struct MacPolishApp: App {
         Settings {
             SettingsView()
                 .environmentObject(model)
-                .frame(width: 480, height: 300)
+                .frame(width: 520, height: 460)
         }
     }
 }

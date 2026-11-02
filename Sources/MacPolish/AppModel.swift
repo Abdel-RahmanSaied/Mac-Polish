@@ -4,6 +4,7 @@ import Foundation
 final class AppModel: ObservableObject {
     let optimizer = OptimizerModel()
     let memory = MemoryMonitor()
+    let updates = UpdateChecker()
     @Published var destination: SidebarDestination = .overview
     @Published var state: ScanState = .idle
     @Published var items: [ScanItem] = []

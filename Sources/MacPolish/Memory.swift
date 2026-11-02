@@ -242,7 +242,10 @@ struct MemoryMenu: View {
                 NSApp.activate(ignoringOtherApps: true)
             }.buttonStyle(.borderedProminent)
             Button("Quit Mac Polish") { NSApp.terminate(nil) }.buttonStyle(.borderless)
+            Divider()
+            UpdateControls(updates: model.updates)
         }.padding(20).frame(width: 310)
         .task { monitor.start() }
+        .task { model.updates.start() }
     }
 }

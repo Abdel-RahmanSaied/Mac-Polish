@@ -64,6 +64,7 @@ struct ContentView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
+        .safeAreaInset(edge: .top, spacing: 0) { UpdateBanner(updates: model.updates) }
         .tint(.cyan)
         .alert("Mac Polish", isPresented: Binding(
             get: { model.operationMessage != nil },
@@ -506,6 +507,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            UpdateSettings(updates: model.updates)
             Section("Safety") {
                 Label("Items are moved to Trash, never permanently deleted.", systemImage: "checkmark.shield")
             }

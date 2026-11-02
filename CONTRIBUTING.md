@@ -111,6 +111,7 @@ swiftc -parse-as-library \
   Sources/MacPolish/DuplicateSelection.swift \
   Sources/MacPolish/AppModel.swift \
   Sources/MacPolish/Memory.swift \
+  Sources/MacPolish/Updates.swift \
   Sources/MacPolish/SystemData.swift \
   Sources/MacPolish/Optimize.swift \
   Tests/OptimizePolicyCheck.swift \
@@ -145,3 +146,13 @@ swiftc -parse-as-library \
 ## الترخيص
 
 هذا الدليل لا يمنح ترخيصًا لاستخدام أو إعادة توزيع المشروع. راجع ملف LICENSE إن وُجد، واتفق مع مالك المشروع على شروط المساهمة والتوزيع إذا لم يكن هناك ترخيص معلن. لا تُدرج كودًا أو أصولًا لا تملك حق استخدامها.
+
+## Update checker tests
+
+```sh
+swiftc -parse-as-library Sources/MacPolish/Updates.swift Tests/UpdateCheck.swift -o .build/update-check
+.build/update-check
+.build/update-check --live
+```
+
+The optional `--live` check contacts GitHub to validate published-release decoding. Offline checks cover numeric ordering, preview channels, missing assets, drafts, and downgrade prevention.
