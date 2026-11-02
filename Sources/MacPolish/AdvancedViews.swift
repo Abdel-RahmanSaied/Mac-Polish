@@ -361,6 +361,7 @@ private struct LoadingView: View {
     }
 }
 
+@MainActor
 private func moduleHeader(title: String, subtitle: String, buttonTitle: String, isBusy: Bool = false, action: @escaping () -> Void) -> some View {
     HStack {
         VStack(alignment: .leading, spacing: 5) {
