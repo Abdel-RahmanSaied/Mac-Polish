@@ -5,7 +5,7 @@ extension SidebarDestination {
     var color: Color {
         switch self {
         case .overview, .cleanup, .optimize: .teal
-        case .largeFiles, .storage, .systemData: .blue
+        case .largeFiles, .storage, .systemData, .memory: .blue
         case .duplicates, .applications: .purple
         case .developer: .orange
         case .oldFiles: .pink
@@ -40,6 +40,8 @@ struct ContentView: View {
                     OverviewView()
                 case .optimize:
                     OptimizeView(optimizer: model.optimizer)
+                case .memory:
+                    MemoryView(monitor: model.memory)
                 case .cleanup:
                     ResultsView(title: "Cleanup", items: model.cleanableItems)
                 case .largeFiles:
@@ -79,7 +81,7 @@ private struct SidebarView: View {
 
     var body: some View {
         List(selection: $selection) {
-            sidebarSection("WORKSPACE", items: [.overview, .optimize, .storage, .systemData])
+            sidebarSection("WORKSPACE", items: [.overview, .optimize, .memory, .storage, .systemData])
             sidebarSection("FREE UP SPACE", items: [.cleanup, .largeFiles, .duplicates, .oldFiles])
             sidebarSection("MANAGE", items: [.applications, .developer, .startup])
         }

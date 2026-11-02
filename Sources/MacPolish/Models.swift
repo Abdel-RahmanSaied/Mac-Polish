@@ -3,6 +3,7 @@ import Foundation
 enum SidebarDestination: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case optimize = "Optimize"
+    case memory = "Memory"
     case cleanup = "Cleanup"
     case largeFiles = "Large Files"
     case duplicates = "Duplicates"
@@ -19,6 +20,7 @@ enum SidebarDestination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "sparkles"
         case .optimize: "wand.and.stars.inverse"
+        case .memory: "memorychip"
         case .cleanup: "wand.and.stars"
         case .largeFiles: "externaldrive"
         case .duplicates: "doc.on.doc"

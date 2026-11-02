@@ -110,6 +110,7 @@ swiftc -parse-as-library \
   Sources/MacPolish/AdvancedScanners.swift \
   Sources/MacPolish/DuplicateSelection.swift \
   Sources/MacPolish/AppModel.swift \
+  Sources/MacPolish/Memory.swift \
   Sources/MacPolish/SystemData.swift \
   Sources/MacPolish/Optimize.swift \
   Tests/OptimizePolicyCheck.swift \
