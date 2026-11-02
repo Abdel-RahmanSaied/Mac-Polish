@@ -101,14 +101,9 @@ private struct SidebarView: View {
         }
         .safeAreaInset(edge: .top) {
             HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(LinearGradient(colors: [.cyan, .blue], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 36, height: 36)
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable().scaledToFit()
+                    .frame(width: 44, height: 44)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Mac Polish")
