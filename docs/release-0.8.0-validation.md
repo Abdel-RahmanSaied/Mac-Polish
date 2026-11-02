@@ -59,6 +59,14 @@ Additional checks: shell syntax, plist validation, `git diff --check`, bundle si
 
 An initial in-process directory scan stalled inside macOS directory enumeration for Downloads. A sample identified the blocked read. After moving filesystem work into deadline-controlled child processes, actual scanning, access checks and Optimize completed. Tests additionally cover termination deadlines; the UI does not claim that denied locations were fully scanned.
 
+## CI, publication and installed-app check
+
+- [GitHub Actions run 41531317045](https://github.com/Abdel-RahmanSaied/Mac-Polish/actions/runs/41531317045): **PASS** for build, all eight regression executables, shell syntax and metadata on **macOS 15.8.2 arm64**. An initial SDK isolation error in the shared module header was corrected with explicit `@MainActor` before publishing.
+- [v0.8.0 preview release](https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/tag/v0.8.0) published with the arm64 ZIP, pinned installer and SHA256SUMS. Code revision: `f18d5fc`.
+- Downloaded the published installer and compared it with the source. `--verify-only` passed. Running-app installation refusal passed.
+- Installed from the published asset into the current user's Applications folder; previous installation preserved. Installed signature/version checks passed, the app launched, and its manual updater returned **You're up to date (0.8.0)**.
+- **Installed file-scan coverage is incomplete:** the fresh installation's file scan reached its deadline. The app displayed **Incomplete**, enabled retry and opened access setup correctly; returning did not retry automatically. Memory monitoring continued afterward. This is a handled timeout, not a successful full installed-device scan. The exact stalled directory/provider/access request in this installation was not established; no macOS permissions were changed to force the test through.
+
 ## Scope limits
 
 - Full Disk Access remains a manual macOS decision. Its grant/relaunch flow was not automated. The app cannot repair ownership, ACLs, immutable flags or read-only volumes by requesting Full Disk Access.
