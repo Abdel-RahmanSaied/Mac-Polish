@@ -1,10 +1,12 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindow: NSWindow?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        applyDockIcon()
 
         DispatchQueue.main.async {
             NSApp.activate(ignoringOtherApps: true)
@@ -14,7 +16,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func applyDockIcon() {
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+              let icon = NSImage(contentsOf: url) else { return }
+        // Set the running Dock tile directly, including when Launch Services has cached a generic icon.
+        NSApp.applicationIconImage = icon
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        applyDockIcon()
         if !flag {
             mainWindow?.makeKeyAndOrderFront(nil)
             sender.activate(ignoringOtherApps: true)
@@ -27,7 +37,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-@main
 struct MacPolishApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
@@ -62,7 +71,7 @@ struct MacPolishApp: App {
         Settings {
             SettingsView()
                 .environmentObject(model)
-                .frame(width: 520, height: 460)
+                .frame(width: 560, height: 640)
         }
     }
 }

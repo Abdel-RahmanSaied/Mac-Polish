@@ -10,6 +10,7 @@ struct ApplicationsView: View {
                 title: "Applications",
                 subtitle: "Inspect application size, versions, and related leftover files.",
                 buttonTitle: "Refresh",
+                isBusy: model.applicationState == .loading,
                 action: { model.loadApplications(force: true) }
             )
 
@@ -27,7 +28,9 @@ struct ApplicationsView: View {
 
     @ViewBuilder
     private var moduleContent: some View {
-        if model.applicationState == .loading && model.applications.isEmpty {
+        if case .failed(let message) = model.applicationState {
+            ScanFailureView(message: message)
+        } else if model.applicationState == .loading && model.applications.isEmpty {
             LoadingView(title: "Inspecting installed applications…")
         } else if filteredApplications.isEmpty {
             ContentUnavailableView("No applications found", systemImage: "square.grid.2x2", description: Text("Try refreshing the application scan."))
@@ -70,6 +73,7 @@ struct ApplicationsView: View {
                 }
             }
             .listStyle(.inset)
+            .disabled(model.applicationState == .loading)
 
             HStack {
                 Text("\(model.applications.count) apps · \(model.selectedApplicationsSize.formattedBytes) selected")
@@ -110,10 +114,13 @@ struct DuplicatesView: View {
                 title: "Duplicate Finder",
                 subtitle: "Byte-accurate SHA-256 matching across personal folders.",
                 buttonTitle: "Scan Again",
+                isBusy: model.duplicateState == .loading,
                 action: { model.findDuplicates(force: true) }
             )
 
-            if model.duplicateState == .loading && model.duplicateFiles.isEmpty {
+            if case .failed(let message) = model.duplicateState {
+            ScanFailureView(message: message)
+        } else if model.duplicateState == .loading && model.duplicateFiles.isEmpty {
                 LoadingView(title: "Hashing possible duplicates…")
             } else if model.duplicateGroups.isEmpty {
                 ContentUnavailableView("No duplicates found", systemImage: "doc.on.doc", description: Text("Files smaller than 1 MB are skipped."))
@@ -157,6 +164,7 @@ struct DuplicatesView: View {
                     }
                 }
                 .listStyle(.inset)
+                .disabled(model.duplicateState == .loading)
 
                 HStack(spacing: 12) {
                     Image(systemName: "doc.on.doc").foregroundStyle(.purple)
@@ -203,9 +211,8 @@ struct DuplicatesView: View {
     }
 
     private func selectExtras(in group: DuplicateGroup) {
-        for file in group.files.dropFirst() {
-            model.setDuplicateSelection(true, id: file.id)
-        }
+        let keeper = group.files.sorted { $0.url.path < $1.url.path }.first?.id
+        for file in group.files { model.setDuplicateSelection(file.id != keeper, id: file.id) }
     }
 }
 
@@ -219,10 +226,13 @@ struct StorageMapView: View {
                 title: "Storage Map",
                 subtitle: "Understand which areas of your home folder use the most space.",
                 buttonTitle: "Analyze Again",
+                isBusy: model.storageState == .loading,
                 action: { model.analyzeStorage(force: true) }
             )
 
-            if model.storageState == .loading && model.storageEntries.isEmpty {
+            if case .failed(let message) = model.storageState {
+            ScanFailureView(message: message)
+        } else if model.storageState == .loading && model.storageEntries.isEmpty {
                 LoadingView(title: "Measuring folders…")
             } else if model.storageEntries.isEmpty {
                 ContentUnavailableView("No storage data", systemImage: "chart.pie", description: Text("Start an analysis to map your storage."))
@@ -250,10 +260,13 @@ struct StartupItemsView: View {
                 title: "Startup Items",
                 subtitle: "Audit agents and daemons that can run in the background.",
                 buttonTitle: "Refresh",
+                isBusy: model.startupState == .loading,
                 action: { model.loadStartupItems(force: true) }
             )
 
-            if model.startupState == .loading && model.startupEntries.isEmpty {
+            if case .failed(let message) = model.startupState {
+            ScanFailureView(message: message)
+        } else if model.startupState == .loading && model.startupEntries.isEmpty {
                 LoadingView(title: "Reading launch services…")
             } else if model.startupEntries.isEmpty {
                 ContentUnavailableView("No startup items found", systemImage: "bolt.circle", description: Text("No launch agents were detected in standard locations."))
@@ -348,7 +361,7 @@ private struct LoadingView: View {
     }
 }
 
-private func moduleHeader(title: String, subtitle: String, buttonTitle: String, action: @escaping () -> Void) -> some View {
+private func moduleHeader(title: String, subtitle: String, buttonTitle: String, isBusy: Bool = false, action: @escaping () -> Void) -> some View {
     HStack {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
@@ -359,6 +372,20 @@ private func moduleHeader(title: String, subtitle: String, buttonTitle: String, 
         Spacer()
         Button(buttonTitle, action: action)
             .buttonStyle(.borderedProminent)
+            .disabled(isBusy)
     }
     .padding(30)
+}
+
+
+private struct ScanFailureView: View {
+    @EnvironmentObject private var model: AppModel
+    let message: String
+    var body: some View {
+        VStack(spacing: 15) {
+            ContentUnavailableView("Scan incomplete", systemImage: "exclamationmark.triangle", description: Text(message))
+            Button("Review Scan Permissions…") { model.access.presented = true }
+                .buttonStyle(.borderedProminent).padding(.bottom, 24)
+        }
+    }
 }

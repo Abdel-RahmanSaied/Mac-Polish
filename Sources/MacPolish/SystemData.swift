@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import SwiftUI
 import AppKit
 
@@ -149,10 +150,18 @@ struct SystemDataScanner: Sendable {
             let deadline = Date().addingTimeInterval(timeout)
             while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
             let timedOut = process.isRunning
-            if timedOut { process.terminate() }
+            if timedOut {
+                process.terminate()
+                let grace = Date().addingTimeInterval(1)
+                while process.isRunning && Date() < grace { Thread.sleep(forTimeInterval: 0.05) }
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                let killDeadline = Date().addingTimeInterval(1)
+                while process.isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.05) }
+                if !process.isRunning { process.waitUntilExit() }
+            }
             let output = (try? String(contentsOf: outputURL, encoding: .utf8)) ?? ""
             return (output, timedOut ? -1 : process.terminationStatus)
-        } catch { return ("", -1) }
+        } catch { return (error.localizedDescription, -1) }
     }
 }
 

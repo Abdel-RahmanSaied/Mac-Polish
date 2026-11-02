@@ -2,10 +2,17 @@ import Foundation
 
 struct DiskScanner: Sendable {
     private var fileManager: FileManager { .default }
+    private let home: URL
+    private let applicationsRoot: URL
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+         applicationsRoot: URL = URL(fileURLWithPath: "/Applications", isDirectory: true)) {
+        self.home = home
+        self.applicationsRoot = applicationsRoot
+    }
 
     func scan(includeLargeFiles: Bool = true) -> [ScanItem] {
         var items: [ScanItem] = []
-        let home = fileManager.homeDirectoryForCurrentUser
+        let home = self.home
 
         items += scanChildren(of: home.appending(path: "Library/Caches"), category: .cache).filter {
             !["com.apple.dt.Xcode", "org.swift.swiftpm"].contains($0.url.lastPathComponent)
@@ -98,7 +105,7 @@ struct DiskScanner: Sendable {
     }
 
     private func scanOldXcodeCopies() -> [ScanItem] {
-        let applications = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        let applications = applicationsRoot
         guard let urls = try? fileManager.contentsOfDirectory(
             at: applications,
             includingPropertiesForKeys: [.contentModificationDateKey],
@@ -131,11 +138,10 @@ struct DiskScanner: Sendable {
     }
 
     private func scanOldXcodeDownloads(in downloads: URL) -> [ScanItem] {
-        guard let urls = try? fileManager.contentsOfDirectory(
-            at: downloads,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
+        // Filter names before requesting resource metadata. Prefetching allocated sizes for
+        // every unrelated download can block in Foundation on special/provider-backed files.
+        guard let names = try? fileManager.contentsOfDirectory(atPath: downloads.path) else { return [] }
+        let urls = names.filter { !$0.hasPrefix(".") }.map { downloads.appending(path: $0) }
         let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? .distantPast
 
         return urls.compactMap { url in
@@ -170,7 +176,7 @@ struct DiskScanner: Sendable {
             isSelected: false
         )
 
-        let applications = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        let applications = applicationsRoot
         if let appURLs = try? fileManager.contentsOfDirectory(
             at: applications,
             includingPropertiesForKeys: [.contentModificationDateKey],
@@ -234,12 +240,14 @@ struct DiskScanner: Sendable {
         ]
         guard let enumerator = fileManager.enumerator(
             at: root,
-            includingPropertiesForKeys: keys,
+            includingPropertiesForKeys: nil,
             options: [.skipsPackageDescendants, .skipsHiddenFiles]
         ) else { return [] }
 
         var items: [ScanItem] = []
         for case let url as URL in enumerator {
+            guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                  attributes[.type] as? FileAttributeType == .typeRegular else { continue }
             guard let values = try? url.resourceValues(forKeys: Set(keys)),
                   values.isRegularFile == true,
                   values.isSymbolicLink != true else { continue }
@@ -257,31 +265,7 @@ struct DiskScanner: Sendable {
     }
 
     private func allocatedSize(of url: URL) -> Int64 {
-        let keys: Set<URLResourceKey> = [
-            .isRegularFileKey,
-            .isDirectoryKey,
-            .fileAllocatedSizeKey,
-            .totalFileAllocatedSizeKey
-        ]
-        guard let values = try? url.resourceValues(forKeys: keys) else { return 0 }
-
-        if values.isRegularFile == true {
-            return Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
-        }
-        guard values.isDirectory == true,
-              let enumerator = fileManager.enumerator(
-                at: url,
-                includingPropertiesForKeys: Array(keys),
-                options: [.skipsPackageDescendants, .skipsHiddenFiles]
-              ) else { return 0 }
-
-        var total: Int64 = 0
-        for case let child as URL in enumerator {
-            guard let childValues = try? child.resourceValues(forKeys: keys),
-                  childValues.isRegularFile == true else { continue }
-            total += Int64(childValues.totalFileAllocatedSize ?? childValues.fileAllocatedSize ?? 0)
-        }
-        return total
+        FileSizeCalculator.allocatedSize(of: url)
     }
 
     private func isSymbolicLink(_ url: URL) -> Bool {
@@ -292,25 +276,45 @@ struct DiskScanner: Sendable {
 struct SafeCleaner: Sendable {
     private var fileManager: FileManager { .default }
 
-    func clean(_ items: [ScanItem]) -> CleanupResult {
+    func clean(_ items: [ScanItem], trashItem: @Sendable (URL) throws -> Void = { url in
+        _ = try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+    }) -> CleanupResult {
         var removedCount = 0
         var reclaimedBytes: Int64 = 0
         var failures: [String] = []
+        var issues: [CleanupIssue] = []
         var removedItemIDs: Set<UUID> = []
 
         for item in items where item.isSelected {
             guard isAllowed(item) else {
-                failures.append("Blocked unsafe path: \(item.url.path)")
+                let issue = CleanupIssue(url: item.url, kind: .unsafe, detail: "Blocked unsafe path.")
+                failures.append(issue.message)
+                issues.append(issue)
                 continue
             }
 
+            if let issue = TrashValidation.preflight(item.url) {
+                failures.append(issue.message)
+                issues.append(issue)
+                continue
+            }
+            if let expected = item.modifiedAt,
+               let current = try? fileManager.attributesOfItem(atPath: item.url.path)[.modificationDate] as? Date,
+               current != expected {
+                let issue = CleanupIssue(url: item.url, kind: .changed, detail: "The item changed after scanning. Scan again before cleaning it.")
+                failures.append(issue.message)
+                issues.append(issue)
+                continue
+            }
             do {
-                _ = try fileManager.trashItem(at: item.url, resultingItemURL: nil)
+                try trashItem(item.url)
                 removedCount += 1
                 reclaimedBytes += item.size
                 removedItemIDs.insert(item.id)
             } catch {
-                failures.append("\(item.displayName): \(error.localizedDescription)")
+                let issue = TrashValidation.issue(for: error as NSError, url: item.url)
+                failures.append(issue.message)
+                issues.append(issue)
             }
         }
 
@@ -318,13 +322,15 @@ struct SafeCleaner: Sendable {
             removedCount: removedCount,
             reclaimedBytes: reclaimedBytes,
             failures: failures,
-            removedItemIDs: removedItemIDs
+            removedItemIDs: removedItemIDs,
+            issues: issues
         )
     }
 
     func isAllowed(_ url: URL) -> Bool {
         let home = fileManager.homeDirectoryForCurrentUser.standardizedFileURL
         let candidate = url.standardizedFileURL
+        guard TrashValidation.isUnredirected(url) else { return false }
         let roots = [
             home.appending(path: "Library/Caches"),
             home.appending(path: "Library/Logs"),
@@ -344,6 +350,7 @@ struct SafeCleaner: Sendable {
     }
 
     private func isAllowed(_ item: ScanItem) -> Bool {
+        guard TrashValidation.isUnredirected(item.url) else { return false }
         if isAllowed(item.url) { return true }
         if item.category == .oldXcode {
             let path = item.url.standardizedFileURL.path

@@ -47,11 +47,14 @@ final class OptimizerModel: ObservableObject {
     @Published var freeBytes: Int64?
     @Published var totalBytes: Int64?
     @Published var coverage = ""
+    @Published var recommendationWarning: String?
     @Published var reviewCount = 0
     @Published var includeDocker = false
     @Published var confirm = false
     @Published var results: [String] = []
+    @Published var cleanupIssues: [CleanupIssue] = []
     @Published var completed = false
+    var onOutcome: (@MainActor (CleanupOutcome) -> Void)?
     var selectedBytes: Int64 { candidates.filter(\.selected).reduce(0) { $0 + $1.item.size } }
     var selectedCount: Int { candidates.filter(\.selected).count }
     var hasActions: Bool { selectedCount > 0 || (includeDocker && dockerAvailable) }
@@ -68,6 +71,7 @@ final class OptimizerModel: ObservableObject {
         busy = true
         completed = false
         results = []
+        cleanupIssues = []
         candidates = []
         includeDocker = false
         report = nil
@@ -75,6 +79,7 @@ final class OptimizerModel: ObservableObject {
         reviewAreas = []
         reviewCount = 0
         coverage = ""
+        recommendationWarning = nil
         refreshCapacity()
         phase = "Inspecting accessible folders across the Mac…"
         Task {
@@ -100,11 +105,16 @@ final class OptimizerModel: ObservableObject {
             }.value
             refreshCapacity()
             phase = "Preparing cleanup recommendations…"
-            let found = await Task.detached(priority: .utility) { DiskScanner().scan() }.value
-            candidates = found.compactMap { OptimizePolicy.candidate($0) }
-                .sorted { $0.item.size > $1.item.size }
-            reviewCount = found.filter { !OptimizePolicy.categories.contains($0.category) && $0.category != .trash }.count
-            phase = "Review your optimization plan"
+            let found = await Task.detached(priority: .utility) { DiskScanService.scan() }.value
+            switch found {
+            case .success(let items):
+                candidates = items.compactMap { OptimizePolicy.candidate($0) }.sorted { $0.item.size > $1.item.size }
+                reviewCount = items.filter { !OptimizePolicy.categories.contains($0.category) && $0.category != .trash }.count
+                phase = "Review your optimization plan"
+            case .failure(let failure):
+                recommendationWarning = failure.message
+                phase = "Scan incomplete — review access or try again"
+            }
             busy = false
         }
     }
@@ -120,7 +130,7 @@ final class OptimizerModel: ObservableObject {
         confirm = false
         phase = "Moving reviewed cache and log files to Trash…"
         Task {
-            let outcome = await Task.detached(priority: .utility) { () -> [String] in
+            let outcome = await Task.detached(priority: .utility) { () -> (messages: [String], issues: [CleanupIssue], removedIDs: Set<UUID>, movedBytes: Int64) in
                 var messages: [String] = []
                 var safe: [ScanItem] = []
                 for candidate in plan {
@@ -134,10 +144,12 @@ final class OptimizerModel: ObservableObject {
                 }
                 let result = SafeCleaner().clean(safe)
                 messages.insert("Moved \(result.removedCount) items (\(result.reclaimedBytes.formattedBytes)) to Trash. Space is released after Trash is emptied.", at: 0)
-                messages += result.failures
-                return messages
+                if !result.issues.isEmpty { messages.append(CleanupIssue.summary(result.issues)) }
+                return (messages, result.issues, result.removedItemIDs, result.reclaimedBytes)
             }.value
-            results = outcome
+            results = outcome.messages
+            cleanupIssues = outcome.issues
+            onOutcome?(CleanupOutcome(date: Date(), movedCount: outcome.removedIDs.count, movedBytes: outcome.movedBytes, issues: outcome.issues))
             if docker {
                 phase = "Cleaning Docker build cache…"
                 let message = await Task.detached(priority: .utility) {
@@ -146,18 +158,21 @@ final class OptimizerModel: ObservableObject {
                 results.append(message)
             }
             phase = "Updating storage measurements…"
-            report = await Task.detached(priority: .utility) { SystemDataScanner().scan() }.value
+            // Keep recovery responsive instead of waiting for another full scan after access failures.
+            if cleanupIssues.isEmpty || docker {
+                report = await Task.detached(priority: .utility) { SystemDataScanner().scan() }.value
+            }
             refreshCapacity()
             if let beforeFree, let afterFree = freeBytes {
                 let delta = afterFree - beforeFree
                 results.append("Available space now: \(afterFree.formattedBytes). Observed change: \(delta >= 0 ? "+" : "−")\(abs(delta).formattedBytes). Other apps and macOS can affect this measurement.")
             }
-            candidates = []
+            candidates.removeAll { outcome.removedIDs.contains($0.id) }
             includeDocker = false
             reviewAreas = []
             diskAreas = []
-            completed = true
-            phase = "Optimization finished — review the results below"
+            completed = candidates.isEmpty
+            phase = cleanupIssues.isEmpty ? "Optimization finished — review the results below" : "Some items need your review before retrying"
             running = false
             busy = false
         }
@@ -165,6 +180,7 @@ final class OptimizerModel: ObservableObject {
 }
 
 struct OptimizeView: View {
+    @EnvironmentObject private var model: AppModel
     @ObservedObject var optimizer: OptimizerModel
     var body: some View {
         VStack(spacing: 0) {
@@ -206,6 +222,10 @@ struct OptimizeView: View {
                             }.padding(14).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
                         }
                     }
+                    if let warning = optimizer.recommendationWarning {
+                        Label(warning, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange)
+                        Button("Review Scan Permissions…") { model.access.presented = true }
+                    }
                     if !optimizer.coverage.isEmpty {
                         Label(optimizer.coverage, systemImage: "info.circle").font(.caption)
                     }
@@ -223,6 +243,12 @@ struct OptimizeView: View {
                     if !optimizer.results.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Results").font(.title3.bold())
+                            if optimizer.cleanupIssues.contains(where: \.needsAccess) {
+                                Button("Review Permissions…") {
+                                    model.operationIssues = optimizer.cleanupIssues
+                                    model.reviewCleanupPermissions()
+                                }
+                            }
                             ForEach(Array(optimizer.results.enumerated()), id: \.offset) { _, message in
                                 Text(message).font(.callout).textSelection(.enabled)
                             }
@@ -235,7 +261,9 @@ struct OptimizeView: View {
                             Text("\(optimizer.selectedBytes.formattedBytes) selected").foregroundStyle(.secondary)
                         }
                         if optimizer.candidates.isEmpty {
-                            Text("No eligible older caches or logs were found in accessible locations. This is not a complete bill of health; review scan coverage and large locations.")
+                            Text(optimizer.recommendationWarning == nil
+                                 ? "No eligible older caches or logs were found in accessible locations. This is not a complete bill of health; review scan coverage and large locations."
+                                 : "Cleanup recommendations are unavailable for this scan. Review access and try again.")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach($optimizer.candidates) { $candidate in

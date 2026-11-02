@@ -1,0 +1,25 @@
+name: Validate macOS build
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: swift build
+      - name: Regression checks
+        run: Scripts/test.sh
+      - name: Validate scripts and bundle metadata
+        run: |
+          bash -n Scripts/install.sh
+          zsh -n Scripts/build-app.sh Scripts/package-release.sh Scripts/test.sh Scripts/build-ui-e2e.sh
+          plutil -lint Resources/Info.plist
+          git diff --check

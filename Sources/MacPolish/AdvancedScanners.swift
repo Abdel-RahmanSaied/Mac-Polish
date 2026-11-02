@@ -45,7 +45,7 @@ struct ApplicationScanner: Sendable {
                     size: allocatedSize(of: url),
                     leftoverURLs: leftovers,
                     leftoverSize: leftovers.reduce(0) { $0 + allocatedSize(of: $1) },
-                    canRemove: !path.hasPrefix("/System/Applications/"),
+                    canRemove: !path.hasPrefix("/System/Applications/") && bundleID != "com.asaied.macpolish",
                     isSelected: false
                 ))
             }
@@ -88,13 +88,13 @@ struct ApplicationScanner: Sendable {
 struct DuplicateScanner: Sendable {
     private var fileManager: FileManager { .default }
 
-    func scan(minimumSize: Int64 = 1_024 * 1_024) -> [DuplicateFile] {
+    func scan(minimumSize: Int64 = 1_024 * 1_024, roots customRoots: [URL]? = nil) -> [DuplicateFile] {
         let home = fileManager.homeDirectoryForCurrentUser
-        let roots = ["Downloads", "Documents", "Desktop", "Pictures"].map {
+        let roots = customRoots ?? ["Downloads", "Documents", "Desktop", "Pictures"].map {
             home.appending(path: $0, directoryHint: .isDirectory)
         }
         let keys: Set<URLResourceKey> = [
-            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .totalFileAllocatedSizeKey
+            .isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .totalFileAllocatedSizeKey
         ]
         var bySize: [Int64: [URL]] = [:]
 
@@ -106,6 +106,10 @@ struct DuplicateScanner: Sendable {
             ) else { continue }
 
             for case let url as URL in enumerator {
+                if TrashValidation.isManagedDependency(url) {
+                    enumerator.skipDescendants()
+                    continue
+                }
                 guard let values = try? url.resourceValues(forKeys: keys),
                       values.isRegularFile == true,
                       values.isSymbolicLink != true else { continue }
@@ -143,19 +147,9 @@ struct DuplicateScanner: Sendable {
     }
 
     private func fingerprint(of url: URL) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
-
-        var hasher = SHA256()
-        do {
-            while let data = try handle.read(upToCount: 1_024 * 1_024), !data.isEmpty {
-                hasher.update(data: data)
-            }
-            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        } catch {
-            return nil
-        }
+        try? FileFingerprint.sha256(url)
     }
+
 }
 
 struct StorageScanner: Sendable {
@@ -218,46 +212,65 @@ struct ApplicationUninstaller: Sendable {
         var removedIDs: Set<UUID> = []
         var reclaimedBytes: Int64 = 0
         var failures: [String] = []
+        var issues: [CleanupIssue] = []
 
         for application in applications where application.isSelected {
-            guard application.canRemove, isAllowedApplication(application.url) else {
-                failures.append("Protected application: \(application.name)")
+            guard application.canRemove, application.bundleIdentifier != "com.asaied.macpolish", isAllowedApplication(application.url) else {
+                let issue = CleanupIssue(url: application.url, kind: .unsafe, detail: "Protected application.")
+                failures.append(issue.message)
+                issues.append(issue)
                 continue
             }
 
+            if let issue = TrashValidation.preflight(application.url) {
+                failures.append(issue.message)
+                issues.append(issue)
+                continue
+            }
             do {
                 _ = try fileManager.trashItem(at: application.url, resultingItemURL: nil)
                 reclaimedBytes += application.size
 
                 for leftover in application.leftoverURLs where isAllowedLeftover(leftover) {
+                    if let issue = TrashValidation.preflight(leftover) {
+                        failures.append(issue.message)
+                        issues.append(issue)
+                        continue
+                    }
                     do {
                         let leftoverSize = FileSizeCalculator.allocatedSize(of: leftover)
                         _ = try fileManager.trashItem(at: leftover, resultingItemURL: nil)
                         reclaimedBytes += leftoverSize
                     } catch {
-                        failures.append("\(leftover.lastPathComponent): \(error.localizedDescription)")
+                        let issue = TrashValidation.issue(for: error as NSError, url: leftover)
+                        failures.append(issue.message)
+                        issues.append(issue)
                     }
                 }
                 removedIDs.insert(application.id)
             } catch {
-                failures.append("\(application.name): \(error.localizedDescription)")
+                let issue = TrashValidation.issue(for: error as NSError, url: application.url)
+                failures.append(issue.message)
+                issues.append(issue)
             }
         }
 
-        return ApplicationRemovalResult(removedIDs: removedIDs, reclaimedBytes: reclaimedBytes, failures: failures)
+        return ApplicationRemovalResult(removedIDs: removedIDs, reclaimedBytes: reclaimedBytes, failures: failures, issues: issues)
     }
 
     private func isAllowedApplication(_ url: URL) -> Bool {
         let path = url.standardizedFileURL.path
         let homeApplications = fileManager.homeDirectoryForCurrentUser.appending(path: "Applications").standardizedFileURL.path
-        return url.pathExtension.lowercased() == "app"
+        return TrashValidation.isUnredirected(url)
+            && url.pathExtension.lowercased() == "app"
             && (path.hasPrefix("/Applications/") || path.hasPrefix(homeApplications + "/"))
             && !path.hasPrefix("/System/")
     }
 
     private func isAllowedLeftover(_ url: URL) -> Bool {
         let library = fileManager.homeDirectoryForCurrentUser.appending(path: "Library").standardizedFileURL.path
-        return url.standardizedFileURL.path.hasPrefix(library + "/")
+        return TrashValidation.isUnredirected(url)
+            && url.standardizedFileURL.path.hasPrefix(library + "/")
     }
 }
 
@@ -276,7 +289,7 @@ enum FileSizeCalculator {
               let enumerator = fileManager.enumerator(
                 at: url,
                 includingPropertiesForKeys: Array(keys),
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                options: []
               ) else { return 0 }
 
         var total: Int64 = 0

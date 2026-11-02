@@ -34,7 +34,7 @@ enum SidebarDestination: String, CaseIterable, Identifiable {
     }
 }
 
-enum ScanCategory: String, CaseIterable, Hashable, Sendable {
+enum ScanCategory: String, CaseIterable, Hashable, Sendable, Codable {
     case cache = "Application Caches"
     case logs = "Old Logs"
     case trash = "Trash"
@@ -83,7 +83,7 @@ enum ScanCategory: String, CaseIterable, Hashable, Sendable {
     }
 }
 
-struct ScanItem: Identifiable, Hashable, Sendable {
+struct ScanItem: Identifiable, Hashable, Sendable, Codable {
     let id: UUID
     let url: URL
     let size: Int64
@@ -128,7 +128,7 @@ enum ModuleState: Equatable {
     case failed(String)
 }
 
-struct ApplicationItem: Identifiable, Hashable, Sendable {
+struct ApplicationItem: Identifiable, Hashable, Sendable, Codable {
     let id: UUID
     let name: String
     let url: URL
@@ -143,7 +143,7 @@ struct ApplicationItem: Identifiable, Hashable, Sendable {
     var totalSize: Int64 { size + leftoverSize }
 }
 
-struct DuplicateFile: Identifiable, Hashable, Sendable {
+struct DuplicateFile: Identifiable, Hashable, Sendable, Codable {
     let id: UUID
     let url: URL
     let size: Int64
@@ -159,14 +159,14 @@ struct DuplicateGroup: Identifiable, Sendable {
     var reclaimableSize: Int64 { fileSize * Int64(max(0, files.count - 1)) }
 }
 
-struct StorageEntry: Identifiable, Hashable, Sendable {
+struct StorageEntry: Identifiable, Hashable, Sendable, Codable {
     let id: UUID
     let name: String
     let url: URL
     let size: Int64
 }
 
-struct StartupEntry: Identifiable, Hashable, Sendable {
+struct StartupEntry: Identifiable, Hashable, Sendable, Codable {
     let id: UUID
     let label: String
     let url: URL
@@ -175,10 +175,40 @@ struct StartupEntry: Identifiable, Hashable, Sendable {
     let requiresAdministrator: Bool
 }
 
+struct CleanupIssue: Identifiable, Equatable, Sendable {
+    enum Kind: String, Sendable {
+        case permission, managedCache, locked, readOnly, missing, unsafe, changed, other
+    }
+    var id: String { url.path + ":" + kind.rawValue }
+    let url: URL
+    let kind: Kind
+    let detail: String
+    var needsAccess: Bool { kind == .permission }
+    var message: String { url.lastPathComponent + ": " + detail }
+
+    static func summary(_ issues: [Self]) -> String {
+        let denied = issues.filter(\.needsAccess).count
+        let managed = issues.filter { $0.kind == .managedCache }.count
+        let restricted = issues.filter { $0.kind == .locked || $0.kind == .readOnly }.count
+        var messages: [String] = []
+        if denied > 0 {
+            messages.append("\(denied) item(s) could not be moved because access was denied. Review folder permissions and Full Disk Access, then retry the selected items. Ownership, ACLs or file locks may also prevent moving them.")
+        }
+        if managed > 0 {
+            messages.append("Skipped \(managed) managed dependency item(s). Use the owning package manager to manage these files; Full Disk Access does not change their filesystem permissions.")
+        }
+        if restricted > 0 { messages.append("\(restricted) item(s) are locked or in read-only locations. Review them in Finder.") }
+        let other = issues.filter { ![.permission, .managedCache, .locked, .readOnly].contains($0.kind) }
+        messages += other.prefix(2).map(\.message)
+        return messages.joined(separator: "\n\n")
+    }
+}
+
 struct ApplicationRemovalResult: Sendable {
     let removedIDs: Set<UUID>
     let reclaimedBytes: Int64
     let failures: [String]
+    var issues: [CleanupIssue] = []
 }
 
 struct CleanupResult: Sendable {
@@ -186,6 +216,7 @@ struct CleanupResult: Sendable {
     let reclaimedBytes: Int64
     let failures: [String]
     let removedItemIDs: Set<UUID>
+    var issues: [CleanupIssue] = []
 }
 
 extension Int64 {

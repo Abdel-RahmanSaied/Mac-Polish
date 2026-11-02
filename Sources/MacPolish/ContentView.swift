@@ -64,14 +64,24 @@ struct ContentView: View {
             }
         }
         .modifier(AccessSetupPresenter(access: model.access))
+        .sheet(isPresented: $model.showsCleanupDetails) {
+            if let outcome = model.cleanupOutcome {
+                CleanupDetailsView(outcome: outcome, onPermissions: model.reviewCleanupPermissions,
+                                   onClose: { model.showsCleanupDetails = false })
+            }
+        }
         .navigationSplitViewStyle(.balanced)
         .safeAreaInset(edge: .top, spacing: 0) { UpdateBanner(updates: model.updates) }
         .tint(.cyan)
-        .alert("Mac Polish", isPresented: Binding(
+        .alert(model.operationIssues.contains(where: \.needsAccess) ? "File access required" : "Mac Polish", isPresented: Binding(
             get: { model.operationMessage != nil },
             set: { if !$0 { model.operationMessage = nil } }
         )) {
-            Button("OK") { model.operationMessage = nil }
+            if model.operationIssues.contains(where: \.needsAccess) {
+                Button("Review Permissions…") { model.reviewCleanupPermissions() }
+            }
+            Button("View Details…") { model.reviewCleanupDetails() }
+            Button("OK", role: .cancel) { model.operationMessage = nil }
         } message: {
             Text(model.operationMessage ?? "")
         }
@@ -79,6 +89,8 @@ struct ContentView: View {
 }
 
 private struct SidebarView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.openSettings) private var openSettings
     @Binding var selection: SidebarDestination
 
     var body: some View {
@@ -89,15 +101,27 @@ private struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 9) {
-                Image(systemName: "externaldrive.badge.checkmark").foregroundStyle(.teal)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Your Mac. A little lighter.").font(.caption.weight(.medium))
-                    Text("Mac Polish · Personal edition").font(.caption2).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 12) {
+                if model.cleanupOutcome != nil {
+                    Button { model.reviewCleanupDetails() } label: {
+                        Label("Last Cleanup", systemImage: "checklist").frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain).padding(.vertical, 5)
                 }
-                Spacer()
-            }
-            .padding(16)
+                Button { openSettings() } label: {
+                    Label("Settings", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 5)
+                Divider()
+                HStack(spacing: 9) {
+                    Image(systemName: "externaldrive.badge.checkmark").foregroundStyle(.teal)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Your Mac. A little lighter.").font(.caption.weight(.medium))
+                        Text("Mac Polish · Personal edition").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+            }.padding(16)
         }
         .safeAreaInset(edge: .top) {
             HStack(spacing: 10) {
@@ -202,6 +226,10 @@ private struct OverviewView: View {
                             .buttonStyle(.bordered).controlSize(.large)
                     }
                 }
+                if case .failed = model.state {
+                    Button("Review Scan Permissions…") { model.access.presented = true }
+                        .buttonStyle(.bordered)
+                }
                 Text("Caches · Developer files · Large files")
                     .font(.caption).foregroundStyle(.tertiary)
             }
@@ -224,6 +252,10 @@ private struct OverviewView: View {
                             .controlSize(.large)
                         Text("Scanning…")
                             .font(.headline)
+                    } else if case .failed = model.state {
+                        Image(systemName: "exclamationmark.triangle").font(.title2).foregroundStyle(.orange)
+                        Text("Incomplete").font(.headline)
+                        Text("Review access and retry").font(.caption).foregroundStyle(.secondary)
                     } else {
                         Image(systemName: model.items.isEmpty ? "sparkles" : "externaldrive")
                             .font(.title2).foregroundStyle(.teal)
@@ -363,7 +395,11 @@ private struct ResultsView: View {
             }
             .padding(30)
 
-            if model.state == .scanning {
+            if case .failed(let message) = model.state {
+                ContentUnavailableView("Scan incomplete", systemImage: "exclamationmark.triangle", description: Text(message))
+                Button("Review Scan Permissions…") { model.access.presented = true }
+                    .buttonStyle(.borderedProminent).padding(.bottom, 24)
+            } else if model.state == .scanning {
                 VStack(spacing: 15) {
                     ProgressView().controlSize(.large)
                     Text("Finding files to review…").font(.headline)

@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.7.2</string>
+	<string>0.8.0</string>
 	<key>CFBundleVersion</key>
-	<string>11</string>
+	<string>12</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -35,6 +35,6 @@
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>Mac Polish checks Downloads for large, old and duplicate files so you can review cleanup suggestions. Files are only removed after your confirmation.</string>
 	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<string>AppIcon.icns</string>
 </dict>
 </plist>

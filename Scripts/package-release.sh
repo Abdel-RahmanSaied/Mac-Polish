@@ -6,6 +6,8 @@ cd "$PROJECT_ROOT"
 ./Scripts/build-app.sh
 APP="$PROJECT_ROOT/dist/Mac Polish.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+INSTALLER_VERSION="$(awk -F '"' '$1 == "VERSION=" {print $2}' Scripts/install.sh)"
+[[ "$INSTALLER_VERSION" == "$VERSION" ]] || { print -u2 "Installer version does not match app version."; exit 1; }
 ARCHIVE="Mac-Polish-${VERSION}-macos-arm64.zip"
 codesign --verify --deep --strict "$APP"
 lipo "$APP/Contents/MacOS/MacPolish" -verify_arch arm64

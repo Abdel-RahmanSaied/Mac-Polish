@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Pinned release: review this script before running it.
-VERSION="0.7.2"
+VERSION="0.8.0"
 REPOSITORY="Abdel-RahmanSaied/Mac-Polish"
 ASSET="Mac-Polish-${VERSION}-macos-arm64.zip"
 BASE_URL="https://github.com/${REPOSITORY}/releases/download/v${VERSION}"
@@ -42,6 +42,10 @@ lipo "$APP/Contents/MacOS/MacPolish" -verify_arch arm64
 echo "Download, checksum, application signature and architecture verified."
 if [ "$VERIFY_ONLY" = true ]; then exit 0; fi
 
+if pgrep -x MacPolish >/dev/null; then
+    echo "Mac Polish started during download. Quit it before installing." >&2
+    exit 1
+fi
 INSTALL_DIRECTORY="$HOME/Applications"
 DESTINATION="$INSTALL_DIRECTORY/Mac Polish.app"
 mkdir -p "$INSTALL_DIRECTORY"
@@ -57,6 +61,11 @@ if ! mv "$APP" "$DESTINATION"; then
     if [ -n "$BACKUP" ]; then mv "$BACKUP/Mac Polish.app" "$DESTINATION"; fi
     echo "Installation failed; previous app restored if present." >&2
     exit 1
+fi
+# Refresh this bundle's registration so Finder and pinned Dock items can pick up its icon.
+REGISTRATION_TOOL="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ -x "$REGISTRATION_TOOL" ]; then
+    "$REGISTRATION_TOOL" -f "$DESTINATION" >/dev/null 2>&1 || true
 fi
 echo "Installed: $DESTINATION"
 if [ -n "$BACKUP" ]; then echo "Previous version kept at: $BACKUP/Mac Polish.app"; fi

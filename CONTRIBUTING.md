@@ -90,6 +90,22 @@ swift build
 
 المشروع حاليًا لا يعرّف test target في `Package.swift`. الاختبارات الموجودة برامج تحقق مستقلة، ولا يكفي تشغيل `swift test` لتشغيلها.
 
+لتشغيل مجموعة التحقق كاملة بأمر واحد:
+
+```sh
+Scripts/test.sh
+Scripts/test.sh --e2e
+```
+
+الخيار `--e2e` ينشئ ملفات اختبار جديدة داخل مجلد فريد باسم `MacPolish-E2E-*` في Library/Caches، ويجرب الفحص واختيار النسخ والنقل الفعلي إلى Trash ثم الاستعادة. لا يستهدف أي محتويات موجودة مسبقًا في Trash أو ملفات شخصية. توجد أيضًا واجهة اختبار منفصلة:
+
+```sh
+Scripts/build-ui-e2e.sh
+open .build/UIE2E.app
+```
+
+واجهة الاختبار تستخدم bundle identifier منفصلًا وملفات معزولة، وتضيف قائمة E2E لمحاكاة رفض الصلاحية والملف المقفول. لا تدخل في حزمة التطبيق المنشورة. اختبارات الواجهة تراجع التأكيد والإلغاء ومعالجة الخطأ، بينما اختبار Trash الحقيقي منفصل.
+
 اختبار اختيار النسخ المكررة:
 
 ```sh
@@ -107,8 +123,12 @@ swiftc -parse-as-library \
 swiftc -parse-as-library \
   Sources/MacPolish/Models.swift \
   Sources/MacPolish/Scanner.swift \
+  Sources/MacPolish/DiskScanService.swift \
+  Sources/MacPolish/TrashValidation.swift \
   Sources/MacPolish/AdvancedScanners.swift \
   Sources/MacPolish/DuplicateSelection.swift \
+  Sources/MacPolish/DuplicateCleaner.swift \
+  Sources/MacPolish/CleanupDetails.swift \
   Sources/MacPolish/AccessSetup.swift \
   Sources/MacPolish/AppModel.swift \
   Sources/MacPolish/Memory.swift \
@@ -162,8 +182,18 @@ The optional `--live` check contacts GitHub to validate published-release decodi
 ## اختبار إعداد الصلاحيات
 
 ```sh
-swiftc -parse-as-library Sources/MacPolish/AccessSetup.swift Tests/AccessSetupCheck.swift -o .build/access-setup-check
+swiftc -parse-as-library $(rg --files Sources/MacPolish -g '*.swift' | rg -v '/(MacPolishApp|main|ContentView|AdvancedViews)\.swift$') Tests/AccessSetupCheck.swift -o .build/access-setup-check
 .build/access-setup-check
 ```
 
 يستخدم الاختبار مجلدًا مؤقتًا وإعدادات معزولة. لا يطلب صلاحيات macOS ولا يغيّر TCC. يغطي تمييز الوصول المرفوض والمجلد المفقود وخطأ القراءة، وعدم ادعاء الصلاحية عند تخطي الإعداد. يدويًا، راجع ظهور الشاشة أول مرة، والتخطي، وإعادة فتحها من Settings، وعدم بدء الفحص أثناء الإعداد. لا تغيّر صلاحيات النظام نيابة عن المستخدم أثناء الاختبار.
+
+
+## اختبار أخطاء النقل وطلب الوصول
+
+```sh
+swiftc -parse-as-library $(rg --files Sources/MacPolish -g '*.swift' | rg -v '/(MacPolishApp|main|ContentView|AdvancedViews)\.swift$') Tests/TrashValidationCheck.swift -o .build/trash-validation-check
+.build/trash-validation-check
+```
+
+ينشئ الاختبار مجلدًا معزولًا باسم فريد داخل Library/Caches، ويحقن عملية نقل تجريبية لا تحذف أو تنقل الملفات فعليًا. يغطي أخطاء Cocoa وPOSIX والأخطاء المتداخلة، وكاش Go والمجلدات للقراءة فقط، والنجاح الجزئي والاحتفاظ بالاختيارات الفاشلة وفتح شاشة الصلاحيات بدون إعادة تنفيذ التنظيف.

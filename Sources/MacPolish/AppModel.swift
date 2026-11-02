@@ -3,7 +3,14 @@ import Foundation
 @MainActor
 final class AppModel: ObservableObject {
     let access = AccessSetupModel()
-    let optimizer = OptimizerModel()
+    lazy var optimizer: OptimizerModel = {
+        let optimizer = OptimizerModel()
+        optimizer.onOutcome = { [weak self] outcome in
+            self?.cleanupOutcome = outcome
+            self?.operationIssues = outcome.issues
+        }
+        return optimizer
+    }()
     let memory = MemoryMonitor()
     let updates = UpdateChecker()
     @Published var destination: SidebarDestination = .overview
@@ -20,6 +27,9 @@ final class AppModel: ObservableObject {
     @Published var startupEntries: [StartupEntry] = []
     @Published var startupState: ModuleState = .idle
     @Published var operationMessage: String?
+    @Published var operationIssues: [CleanupIssue] = []
+    @Published var cleanupOutcome: CleanupOutcome?
+    @Published var showsCleanupDetails = false
     @Published var applicationSearchText = ""
     @Published var confirmsApplicationRemoval = false
     @Published var confirmsDuplicateRemoval = false
@@ -121,11 +131,16 @@ final class AppModel: ObservableObject {
 
         Task {
             let includeLargeFiles = includeLargeFiles
-            let results = await Task.detached(priority: .userInitiated) { [scanner] in
-                scanner.scan(includeLargeFiles: includeLargeFiles)
+            let result = await Task.detached(priority: .userInitiated) {
+                DiskScanService.scan(includeLargeFiles: includeLargeFiles)
             }.value
-            items = results
-            state = .finished
+            switch result {
+            case .success(let results):
+                items = results
+                state = .finished
+            case .failure(let failure):
+                state = .failed(failure.message)
+            }
         }
     }
 
@@ -133,7 +148,7 @@ final class AppModel: ObservableObject {
         let selectedItems = items.filter { item in
             item.isSelected && (itemIDs?.contains(item.id) ?? true)
         }
-        guard !selectedItems.isEmpty, state != .cleaning else { return }
+        guard !selectedItems.isEmpty, state != .cleaning, state != .scanning else { return }
         state = .cleaning
 
         Task {
@@ -143,6 +158,7 @@ final class AppModel: ObservableObject {
             items.removeAll { result.removedItemIDs.contains($0.id) }
             lastCleanup = result
             state = .finished
+            showCleanupOutcome(removedCount: result.removedCount, bytes: result.reclaimedBytes, issues: result.issues)
         }
     }
 
@@ -158,11 +174,16 @@ final class AppModel: ObservableObject {
         applicationState = .loading
 
         Task {
-            let results = await Task.detached(priority: .userInitiated) { [applicationScanner] in
-                applicationScanner.scan()
+            let result = await Task.detached(priority: .userInitiated) {
+                DiskScanService.read(ApplicationItem.self, mode: "applications")
             }.value
-            applications = results
-            applicationState = .ready
+            switch result {
+            case .success(let results):
+                applications = results
+                applicationState = .ready
+            case .failure(let failure):
+                applicationState = .failed(failure.message)
+            }
         }
     }
 
@@ -172,11 +193,16 @@ final class AppModel: ObservableObject {
         duplicateState = .loading
 
         Task {
-            let results = await Task.detached(priority: .userInitiated) { [duplicateScanner] in
-                duplicateScanner.scan()
+            let result = await Task.detached(priority: .userInitiated) {
+                DiskScanService.read(DuplicateFile.self, mode: "duplicates")
             }.value
-            duplicateFiles = results
-            duplicateState = .ready
+            switch result {
+            case .success(let results):
+                duplicateFiles = results
+                duplicateState = .ready
+            case .failure(let failure):
+                duplicateState = .failed(failure.message)
+            }
         }
     }
 
@@ -186,11 +212,16 @@ final class AppModel: ObservableObject {
         storageState = .loading
 
         Task {
-            let results = await Task.detached(priority: .userInitiated) { [storageScanner] in
-                storageScanner.scan()
+            let result = await Task.detached(priority: .userInitiated) {
+                DiskScanService.read(StorageEntry.self, mode: "storage")
             }.value
-            storageEntries = results
-            storageState = .ready
+            switch result {
+            case .success(let results):
+                storageEntries = results
+                storageState = .ready
+            case .failure(let failure):
+                storageState = .failed(failure.message)
+            }
         }
     }
 
@@ -200,11 +231,16 @@ final class AppModel: ObservableObject {
         startupState = .loading
 
         Task {
-            let results = await Task.detached(priority: .userInitiated) { [startupScanner] in
-                startupScanner.scan()
+            let result = await Task.detached(priority: .userInitiated) {
+                DiskScanService.read(StartupEntry.self, mode: "startup")
             }.value
-            startupEntries = results
-            startupState = .ready
+            switch result {
+            case .success(let results):
+                startupEntries = results
+                startupState = .ready
+            case .failure(let failure):
+                startupState = .failed(failure.message)
+            }
         }
     }
 
@@ -220,7 +256,7 @@ final class AppModel: ObservableObject {
 
     func removeSelectedApplications() {
         let selected = applications.filter(\.isSelected)
-        guard !selected.isEmpty else { return }
+        guard !selected.isEmpty, applicationState != .loading else { return }
         applicationState = .loading
 
         Task {
@@ -229,9 +265,7 @@ final class AppModel: ObservableObject {
             }.value
             applications.removeAll { result.removedIDs.contains($0.id) }
             applicationState = .ready
-            operationMessage = result.failures.isEmpty
-                ? "Moved \(result.removedIDs.count) application(s) to Trash and reclaimed \(result.reclaimedBytes.formattedBytes)."
-                : "Completed with \(result.failures.count) issue(s): \(result.failures.prefix(2).joined(separator: " · "))"
+            showCleanupOutcome(removedCount: result.removedIDs.count, bytes: result.reclaimedBytes, issues: result.issues)
         }
     }
 
@@ -246,19 +280,44 @@ final class AppModel: ObservableObject {
         let selected = duplicateFiles.filter(\.isSelected)
         guard !selected.isEmpty else { return }
         duplicateState = .loading
-        let scanItems = selected.map {
-            ScanItem(id: $0.id, url: $0.url, size: $0.size, category: .largeFile, modifiedAt: nil, isSelected: true)
-        }
-
+        let snapshot = duplicateFiles
         Task {
-            let result = await Task.detached(priority: .userInitiated) { [cleaner] in
-                cleaner.clean(scanItems)
+            let result = await Task.detached(priority: .userInitiated) {
+                DuplicateCleaner().clean(snapshot)
             }.value
-            duplicateFiles.removeAll { result.removedItemIDs.contains($0.id) }
-            duplicateState = .ready
-            operationMessage = result.failures.isEmpty
-                ? "Moved \(result.removedCount) duplicate(s) (\(result.reclaimedBytes.formattedBytes)) to Trash. Disk space is released when Trash is emptied."
-                : "Completed with \(result.failures.count) issue(s): \(result.failures.prefix(2).joined(separator: " · "))"
+            finishDuplicateCleanup(result)
         }
     }
+    func finishDuplicateCleanup(_ result: CleanupResult) {
+        duplicateFiles.removeAll { result.removedItemIDs.contains($0.id) }
+        duplicateState = .ready
+        showCleanupOutcome(removedCount: result.removedCount, bytes: result.reclaimedBytes, issues: result.issues)
+    }
+
+    func showCleanupOutcome(removedCount: Int, bytes: Int64, issues: [CleanupIssue]) {
+        operationIssues = issues
+        cleanupOutcome = CleanupOutcome(date: Date(), movedCount: removedCount, movedBytes: bytes, issues: issues)
+        let moved = "Moved \(removedCount) item(s) (\(bytes.formattedBytes)) to Trash. Disk space is released when Trash is emptied."
+        operationMessage = moved + (issues.isEmpty ? "" : "\n\n" + CleanupIssue.summary(issues))
+    }
+
+    func reviewCleanupDetails() {
+        operationMessage = nil
+        Task { @MainActor in
+            await Task.yield()
+            showsCleanupDetails = true
+        }
+    }
+
+    func reviewCleanupPermissions() {
+        showsCleanupDetails = false
+        operationMessage = nil
+        access.cleanupContext = operationIssues.filter(\.needsAccess)
+        // Dismiss the result alert before presenting the permissions sheet.
+        Task { @MainActor in
+            await Task.yield()
+            access.presented = true
+        }
+    }
+
 }
