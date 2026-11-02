@@ -109,6 +109,7 @@ swiftc -parse-as-library \
   Sources/MacPolish/Scanner.swift \
   Sources/MacPolish/AdvancedScanners.swift \
   Sources/MacPolish/DuplicateSelection.swift \
+  Sources/MacPolish/AccessSetup.swift \
   Sources/MacPolish/AppModel.swift \
   Sources/MacPolish/Memory.swift \
   Sources/MacPolish/Updates.swift \
@@ -156,3 +157,13 @@ swiftc -parse-as-library Sources/MacPolish/Updates.swift Tests/UpdateCheck.swift
 ```
 
 The optional `--live` check contacts GitHub to validate published-release decoding. Offline checks cover numeric ordering, preview channels, missing assets, drafts, and downgrade prevention.
+
+
+## اختبار إعداد الصلاحيات
+
+```sh
+swiftc -parse-as-library Sources/MacPolish/AccessSetup.swift Tests/AccessSetupCheck.swift -o .build/access-setup-check
+.build/access-setup-check
+```
+
+يستخدم الاختبار مجلدًا مؤقتًا وإعدادات معزولة. لا يطلب صلاحيات macOS ولا يغيّر TCC. يغطي تمييز الوصول المرفوض والمجلد المفقود وخطأ القراءة، وعدم ادعاء الصلاحية عند تخطي الإعداد. يدويًا، راجع ظهور الشاشة أول مرة، والتخطي، وإعادة فتحها من Settings، وعدم بدء الفحص أثناء الإعداد. لا تغيّر صلاحيات النظام نيابة عن المستخدم أثناء الاختبار.

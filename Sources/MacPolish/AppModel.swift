@@ -2,6 +2,7 @@ import Foundation
 
 @MainActor
 final class AppModel: ObservableObject {
+    let access = AccessSetupModel()
     let optimizer = OptimizerModel()
     let memory = MemoryMonitor()
     let updates = UpdateChecker()

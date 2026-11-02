@@ -19,7 +19,7 @@
 للأجهزة بمعالج Apple Silicon (M1 أو أحدث)، على macOS 14 أو أحدث:
 
 ```sh
-curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.6.1/install.sh | bash
+curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.7.0/install.sh | bash
 ```
 
 يمكنك تنزيل السكريبت ومراجعته قبل تشغيله. يتحقق من SHA-256 والتوقيع المحلي، ويثبت التطبيق داخل `~/Applications` بدون sudo. أغلق التطبيق قبل تحديثه؛ يحتفظ المثبّت بنسخة من التثبيت السابق. للتحقق من التحميل فقط دون التثبيت، شغّل السكريبت باستخدام `bash install.sh --verify-only`.
@@ -49,6 +49,19 @@ swift run MacPolish
 ```
 
 إذا لم تظهر النافذة، استخدم نسخة التطبيق داخل `dist`. سكريبت البناء يستخدم توقيعًا محليًا ad-hoc؛ هذا ليس توقيع Developer ID أو اعتماد notarization للنشر العام.
+
+## تجهيز صلاحيات الملفات أول مرة
+
+من الإصدار 0.7.0 تظهر شاشة **Prepare your scan** قبل استخدام الأدوات:
+
+1. اختياريًا، افتح **Open Full Disk Access** وفعّل Mac Polish من Privacy & Security. زر **Show This App in Finder** يحدد نفس نسخة التطبيق لإضافتها باستخدام + إذا لم تظهر في القائمة. الصلاحية واسعة وتشمل ملفات محمية وبيانات تطبيقات أخرى.
+2. اضغط **Check & Request Folder Access** لفحص Desktop وDocuments وDownloads والكاش وملفات التطوير وTrash في خطوة واحدة. وافق أو ارفض طلبات macOS حسب اختيارك.
+3. بعد تغيير الصلاحيات، اتبع طلب النظام بإغلاق التطبيق وإعادة فتحه إن ظهر، ثم استخدم **Recheck Folder Access**.
+4. اضغط **Continue to Mac Polish**. تقدر تكمل بدون منح الوصول، وسيكون الفحص محدودًا.
+
+يمكن فتح الشاشة مجددًا من **Settings → File access → Review Scan Permissions**. حالات الوصول تختبر قراءة قائمة المجلد فقط؛ لا تثبت Full Disk Access شاملًا ولا صلاحية حذف كل ملف. لا توجد API عامة لمنح Full Disk Access تلقائيًا، وتأكيدات النظام قد تظهر لكل مجلد. التحديثات ذات التوقيع المحلي قد تستلزم مراجعة الصلاحيات مجددًا. متابعة الذاكرة لا تحتاج هذه الصلاحيات.
+
+مرجع Apple: [التحكم في وصول التطبيقات للملفات](https://support.apple.com/guide/mac-help/control-access-to-files-and-folders-on-mac-mchld5a35146/mac).
 
 ## بداية سريعة: Optimize
 

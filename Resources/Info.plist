@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.6.1</string>
+	<string>0.7.0</string>
 	<key>CFBundleVersion</key>
-	<string>8</string>
+	<string>9</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -28,5 +28,11 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Mac Polish checks Desktop for large, old and duplicate files so you can review cleanup suggestions. Files are only removed after your confirmation.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Mac Polish checks Documents for large, old and duplicate files so you can review cleanup suggestions. Files are only removed after your confirmation.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Mac Polish checks Downloads for large, old and duplicate files so you can review cleanup suggestions. Files are only removed after your confirmation.</string>
 </dict>
 </plist>

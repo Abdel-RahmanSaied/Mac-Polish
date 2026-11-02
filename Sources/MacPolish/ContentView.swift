@@ -63,6 +63,7 @@ struct ContentView: View {
                 }
             }
         }
+        .modifier(AccessSetupPresenter(access: model.access))
         .navigationSplitViewStyle(.balanced)
         .safeAreaInset(edge: .top, spacing: 0) { UpdateBanner(updates: model.updates) }
         .tint(.cyan)
@@ -507,9 +508,10 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            AccessSettings(access: model.access)
             UpdateSettings(updates: model.updates)
             Section("Safety") {
-                Label("Items are moved to Trash, never permanently deleted.", systemImage: "checkmark.shield")
+                Label("File cleanup moves items to Trash. Optional Docker build-cache removal is permanent and asks for confirmation.", systemImage: "checkmark.shield")
             }
         }
         .formStyle(.grouped)
