@@ -10,6 +10,7 @@ struct SystemDataArea: Identifiable, Sendable {
     let bytes: Int64?
     let partial: Bool
     let children: [SystemDataChild]
+    var diagnostic: String = ""
 }
 
 struct SystemDataChild: Identifiable, Sendable {
@@ -68,15 +69,8 @@ struct SystemDataScanner: Sendable {
             ("Swap", URL(fileURLWithPath: "/private/var/vm"), "Virtual memory managed by macOS. Do not delete while the system is running."),
             ("Shared Library", URL(fileURLWithPath: "/Library"), "Shared support files, developer tools, audio assets and logs.")
         ]
-        let areas = specs.map { name, url, note -> SystemDataArea in
-            let result = Self.run("/usr/bin/du", ["-k", "-d", "1", url.path], timeout: 45)
-            let rows = Self.parseDU(result.output)
-            let total = rows.first { $0.url.path == url.path }?.bytes
-            return SystemDataArea(name: name, url: url, note: note, bytes: total,
-                                  partial: result.status != 0,
-                                  children: rows.filter { $0.url.path != url.path && $0.bytes > 0 }
-                                    .sorted { $0.bytes > $1.bytes }.prefix(6).map { $0 })
-        }.sorted { ($0.bytes ?? -1) > ($1.bytes ?? -1) }
+        let areas = specs.map { Self.measure(name: $0.0, url: $0.1, note: $0.2) }
+            .sorted { ($0.bytes ?? -1) > ($1.bytes ?? -1) }
         let docker: String
         if let executable = Self.dockerExecutable {
             let result = Self.run(executable, ["--context", "desktop-linux", "system", "df"], timeout: 25)
@@ -85,6 +79,43 @@ struct SystemDataScanner: Sendable {
             docker = "Docker CLI is not installed. The disk measurement above is still available."
         }
         return SystemDataReport(areas: areas, dockerOutput: docker, date: Date())
+    }
+
+    static func measure(name: String, url: URL, note: String) -> SystemDataArea {
+        let result = run("/usr/bin/du", ["-x", "-k", "-d", "1", url.path], timeout: 45, captureErrors: true)
+        let rows = parseDU(result.output)
+        let total = rows.first { $0.url.path == url.path }?.bytes
+        let diagnostic = measurementStatus(status: result.status, output: result.output, hasTotal: total != nil)
+        return SystemDataArea(name: name, url: url, note: note, bytes: total,
+                              partial: result.status != 0 || total == nil,
+                              children: Array(rows.filter { $0.url.path != url.path && $0.bytes > 0 }
+                                .sorted { $0.bytes > $1.bytes }.prefix(6)), diagnostic: diagnostic)
+    }
+
+    static func measurementStatus(status: Int32, output: String, hasTotal: Bool) -> String {
+        if status == -1 { return "Scan timed out or could not start; measurement is incomplete." }
+        if status == 0 && hasTotal { return "Measured" }
+        let lower = output.lowercased()
+        if lower.contains("permission denied") || lower.contains("operation not permitted") {
+            return "Access restricted. Review Full Disk Access for Mac Polish in System Settings, then scan again."
+        }
+        if lower.contains("no such file or directory") { return "Location missing or changed during scan." }
+        return "Measurement incomplete or unavailable; this does not mean the folder is empty."
+    }
+
+    /// Parse only the build-cache size column; volumes and image totals are never cleanup permission.
+    static func dockerBuildCacheBytes(_ output: String) -> Int64? {
+        guard let line = output.split(separator: "\n").first(where: { $0.hasPrefix("Build Cache") }) else { return nil }
+        let columns = line.split(whereSeparator: { $0.isWhitespace })
+        guard columns.count >= 6 else { return nil }
+        let token = String(columns[4])
+        let units: [(String, Double)] = [("GB", 1e9), ("MB", 1e6), ("kB", 1e3), ("B", 1)]
+        for (unit, factor) in units where token.hasSuffix(unit) {
+            guard let value = Double(token.dropLast(unit.count)), value.isFinite, value >= 0,
+                  value * factor < Double(Int64.max) else { return nil }
+            return Int64(value * factor)
+        }
+        return nil
     }
 
     static func parseDU(_ output: String) -> [SystemDataChild] {
@@ -109,6 +140,9 @@ struct SystemDataScanner: Sendable {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
+            var environment = ProcessInfo.processInfo.environment
+            environment["LC_ALL"] = "C"
+            process.environment = environment
             process.standardOutput = handle
             process.standardError = captureErrors ? handle : FileHandle.nullDevice
             try process.run()
@@ -166,7 +200,7 @@ struct SystemDataView: View {
                                     model.confirmsDockerCleanup = true
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .disabled(model.dockerCleaning || model.systemDataLoading || SystemDataScanner.dockerExecutable == nil)
+                                .disabled(model.dockerCleaning || model.systemDataLoading || SystemDataScanner.dockerExecutable == nil || (SystemDataScanner.dockerBuildCacheBytes(report.dockerOutput) ?? 0) == 0)
                             }
                             if let message = model.dockerCleanupMessage {
                                 Text(message).font(.caption).textSelection(.enabled)
@@ -180,6 +214,7 @@ struct SystemDataView: View {
                         ForEach(report.areas) { area in
                             DisclosureGroup {
                                 VStack(alignment: .leading, spacing: 12) {
+                                    Text(area.diagnostic).font(.caption).foregroundStyle(area.partial ? .orange : .secondary)
                                     Text(area.note).font(.caption).foregroundStyle(.secondary)
                                     Text(area.url.path).font(.caption).textSelection(.enabled)
                                     ForEach(area.children) { child in
@@ -197,7 +232,7 @@ struct SystemDataView: View {
                                 HStack {
                                     Text(area.name).font(.headline)
                                     Spacer()
-                                    if area.partial { Text(area.bytes == nil ? "Unavailable / not installed" : "Partial").font(.caption).foregroundStyle(.orange) }
+                                    if area.partial { Text(area.bytes == nil ? "Unavailable" : "Partial").font(.caption).foregroundStyle(.orange) }
                                     Text(area.bytes?.formattedBytes ?? "—").monospacedDigit()
                                 }
                             }

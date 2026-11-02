@@ -101,7 +101,7 @@ swiftc -parse-as-library \
 .build/duplicate-selection-check
 ```
 
-اختبار سياسة Optimize:
+اختبار سياسة Optimize وحالات قياس المساحة وصلاحيات الوصول وقراءة Docker (يشمل مجلدات مؤقتة فقط، ولا يشغّل تنظيف Docker):
 
 ```sh
 swiftc -parse-as-library \

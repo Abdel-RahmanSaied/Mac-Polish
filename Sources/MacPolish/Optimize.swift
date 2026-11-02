@@ -43,6 +43,9 @@ final class OptimizerModel: ObservableObject {
     @Published var candidates: [OptimizeCandidate] = []
     @Published var report: SystemDataReport?
     @Published var diskAreas: [SystemDataChild] = []
+    @Published var reviewAreas: [SystemDataArea] = []
+    @Published var freeBytes: Int64?
+    @Published var totalBytes: Int64?
     @Published var coverage = ""
     @Published var reviewCount = 0
     @Published var includeDocker = false
@@ -51,8 +54,14 @@ final class OptimizerModel: ObservableObject {
     @Published var completed = false
     var selectedBytes: Int64 { candidates.filter(\.selected).reduce(0) { $0 + $1.item.size } }
     var selectedCount: Int { candidates.filter(\.selected).count }
-    var hasActions: Bool { selectedCount > 0 || includeDocker }
-    var dockerAvailable: Bool { report?.dockerOutput.contains("Build Cache") == true }
+    var hasActions: Bool { selectedCount > 0 || (includeDocker && dockerAvailable) }
+    var dockerAvailable: Bool { (SystemDataScanner.dockerBuildCacheBytes(report?.dockerOutput ?? "") ?? 0) > 0 }
+
+    func refreshCapacity() {
+        let attributes = try? FileManager.default.attributesOfFileSystem(forPath: FileManager.default.homeDirectoryForCurrentUser.path)
+        freeBytes = (attributes?[.systemFreeSize] as? NSNumber)?.int64Value
+        totalBytes = (attributes?[.systemSize] as? NSNumber)?.int64Value
+    }
 
     func scan() {
         guard !busy else { return }
@@ -61,19 +70,35 @@ final class OptimizerModel: ObservableObject {
         results = []
         candidates = []
         includeDocker = false
+        report = nil
+        diskAreas = []
+        reviewAreas = []
+        reviewCount = 0
+        coverage = ""
+        refreshCapacity()
         phase = "Inspecting accessible folders across the Mac…"
         Task {
             let disk = await Task.detached(priority: .utility) {
-                SystemDataScanner.run("/usr/bin/du", ["-x", "-k", "-d", "1", "/System/Volumes/Data"], timeout: 90)
+                SystemDataScanner.run("/usr/bin/du", ["-x", "-k", "-d", "1", "/System/Volumes/Data"], timeout: 90, captureErrors: true)
             }.value
             diskAreas = SystemDataScanner.parseDU(disk.output)
                 .filter { $0.url.path != "/System/Volumes/Data" }
                 .sorted { $0.bytes > $1.bytes }
             coverage = disk.status == 0
                 ? "Measured the accessible startup data volume. External drives are not included."
-                : "Partial disk scan: macOS protected some folders or the scan reached its time limit. External drives are not included."
+                : SystemDataScanner.measurementStatus(status: disk.status, output: disk.output, hasTotal: false) + " External drives are not included."
             phase = "Analyzing system data, developer storage and Docker…"
             report = await Task.detached(priority: .utility) { SystemDataScanner().scan() }.value
+            phase = "Measuring locations for manual review…"
+            reviewAreas = await Task.detached(priority: .utility) {
+                let home = FileManager.default.homeDirectoryForCurrentUser
+                return [("Trash", home.appending(path: ".Trash"), "Review in Finder. Emptying Trash permanently removes its contents."),
+                        ("Downloads", home.appending(path: "Downloads"), "Review installers and downloads you no longer need."),
+                        ("Documents", home.appending(path: "Documents"), "Personal files and projects; review individually."),
+                        ("Applications", URL(fileURLWithPath: "/Applications"), "Review unused apps in Applications; app data may remain elsewhere.")]
+                    .map { SystemDataScanner.measure(name: $0.0, url: $0.1, note: $0.2) }
+            }.value
+            refreshCapacity()
             phase = "Preparing cleanup recommendations…"
             let found = await Task.detached(priority: .utility) { DiskScanner().scan() }.value
             candidates = found.compactMap { OptimizePolicy.candidate($0) }
@@ -87,7 +112,9 @@ final class OptimizerModel: ObservableObject {
     func execute() {
         guard !busy, !completed, hasActions else { return }
         let plan = candidates.filter(\.selected)
-        let docker = includeDocker
+        let docker = includeDocker && dockerAvailable
+        refreshCapacity()
+        let beforeFree = freeBytes
         busy = true
         running = true
         confirm = false
@@ -120,8 +147,15 @@ final class OptimizerModel: ObservableObject {
             }
             phase = "Updating storage measurements…"
             report = await Task.detached(priority: .utility) { SystemDataScanner().scan() }.value
+            refreshCapacity()
+            if let beforeFree, let afterFree = freeBytes {
+                let delta = afterFree - beforeFree
+                results.append("Available space now: \(afterFree.formattedBytes). Observed change: \(delta >= 0 ? "+" : "−")\(abs(delta).formattedBytes). Other apps and macOS can affect this measurement.")
+            }
             candidates = []
             includeDocker = false
+            reviewAreas = []
+            diskAreas = []
             completed = true
             phase = "Optimization finished — review the results below"
             running = false
@@ -150,6 +184,28 @@ struct OptimizeView: View {
                         .font(.headline).foregroundStyle(.teal)
                     Text("Analyze disk usage, system data, developer files and personal-file sizes. Cleanup suggestions focus on older caches and logs. Close the apps whose cache you choose before optimizing.")
                         .foregroundStyle(.secondary)
+                    if let free = optimizer.freeBytes, let total = optimizer.totalBytes {
+                        Label("\(free.formattedBytes) available · \(total.formattedBytes) capacity", systemImage: "internaldrive")
+                            .font(.title3.bold())
+                        Text("Current filesystem free space. Folder sizes are not a promise of space reclaimed; APFS snapshots and shared blocks can affect the result.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if !optimizer.busy && !optimizer.reviewAreas.isEmpty {
+                        Text("Review large locations").font(.title3.bold())
+                        Text("These locations are not selected for automatic cleanup.").font(.caption).foregroundStyle(.secondary)
+                        ForEach(optimizer.reviewAreas) { area in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(area.name).font(.headline)
+                                    Text(area.note).font(.caption)
+                                    Text(area.diagnostic).font(.caption).foregroundStyle(area.partial ? .orange : .secondary)
+                                }
+                                Spacer()
+                                Text(area.bytes?.formattedBytes ?? "—").monospacedDigit()
+                                Button("Review in Finder") { NSWorkspace.shared.open(area.url) }
+                            }.padding(14).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
                     if !optimizer.coverage.isEmpty {
                         Label(optimizer.coverage, systemImage: "info.circle").font(.caption)
                     }
@@ -172,14 +228,14 @@ struct OptimizeView: View {
                             }
                         }.padding(20).background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
                     }
-                    if optimizer.report != nil && !optimizer.completed {
+                    if optimizer.report != nil && !optimizer.completed && !optimizer.busy {
                         HStack {
                             Text("Suggested cleanup").font(.title3.bold())
                             Spacer()
                             Text("\(optimizer.selectedBytes.formattedBytes) selected").foregroundStyle(.secondary)
                         }
                         if optimizer.candidates.isEmpty {
-                            Text("No older cache or log candidates found. Review System Data for other large locations.")
+                            Text("No eligible older caches or logs were found in accessible locations. This is not a complete bill of health; review scan coverage and large locations.")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach($optimizer.candidates) { $candidate in

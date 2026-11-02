@@ -19,7 +19,7 @@
 للأجهزة بمعالج Apple Silicon (M1 أو أحدث)، على macOS 14 أو أحدث:
 
 ```sh
-curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.5.1/install.sh | bash
+curl -fsSL https://github.com/Abdel-RahmanSaied/Mac-Polish/releases/download/v0.6.0/install.sh | bash
 ```
 
 يمكنك تنزيل السكريبت ومراجعته قبل تشغيله. يتحقق من SHA-256 والتوقيع المحلي، ويثبت التطبيق داخل `~/Applications` بدون sudo. أغلق التطبيق قبل تحديثه؛ يحتفظ المثبّت بنسخة من التثبيت السابق. للتحقق من التحميل فقط دون التثبيت، شغّل السكريبت باستخدام `bash install.sh --verify-only`.
@@ -201,3 +201,12 @@ swift build
 Mac Polish checks public GitHub releases on startup and every 6 hours while running. A **View Update** banner appears when a newer version has an uploaded Apple Silicon package. **Check for Updates** is also available in Settings, the app menu, and the menu bar panel.
 
 Settings can disable automatic checks or preview releases (enabled by default for this personal preview). Requests go to GitHub without file contents or scan results. Network failures show a retryable status. The update button opens the release page; installation remains manual. Users of v0.4.0 must manually install v0.5.0 or later once to receive future update notices.
+
+
+### تحسينات Optimize في الإصدار 0.6.0
+
+- يعرض المساحة المتاحة من نظام الملفات، ويعيد قياسها بعد التنظيف. الفرق المرصود قد يتأثر بالتطبيقات الأخرى وAPFS؛ نقل الملفات إلى Trash لا يعني تحرير المساحة فورًا.
+- يعرض Trash وDownloads وDocuments وApplications للمراجعة في Finder، مع الحجم وحالة الفحص. هذه الأماكن لا تدخل في الحذف التلقائي.
+- يوضح تعذّر الوصول، انتهاء مهلة الفحص، أو اختفاء المسار بدل اعتبار المجلد فارغًا. عند تقييد الوصول، راجع Full Disk Access للتطبيق ثم أعد الفحص.
+- يتوقف اقتراح تنظيف Docker build cache عندما يكون حجمه صفرًا أو غير معروف. أحجام Images وVolumes لا تُستخدم لتفعيل هذا الإجراء.
+- يبدأ كل فحص بخطة جديدة، ولا يعرض اقتراحات الفحص السابق أثناء العمل.

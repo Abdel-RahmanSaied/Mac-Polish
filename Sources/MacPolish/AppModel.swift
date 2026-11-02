@@ -29,7 +29,8 @@ final class AppModel: ObservableObject {
     @Published var dockerCleanupMessage: String?
 
     func cleanDockerBuildCache() {
-        guard !dockerCleaning, !systemDataLoading else { return }
+        guard !dockerCleaning, !systemDataLoading,
+              (SystemDataScanner.dockerBuildCacheBytes(systemDataReport?.dockerOutput ?? "") ?? 0) > 0 else { return }
         dockerCleaning = true
         dockerCleanupMessage = nil
         Task {
