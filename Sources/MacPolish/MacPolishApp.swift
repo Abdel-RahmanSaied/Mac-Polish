@@ -3,16 +3,14 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var mainWindow: NSWindow?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         applyDockIcon()
 
+        // ContentView registers its own window (MainWindowRegistration); bring it forward once it exists.
         DispatchQueue.main.async {
             NSApp.activate(ignoringOtherApps: true)
-            self.mainWindow = NSApp.windows.first(where: { $0.canBecomeMain })
-            self.mainWindow?.isReleasedWhenClosed = false
-            self.mainWindow?.makeKeyAndOrderFront(nil)
+            MainWindow.showExisting()
         }
     }
 
@@ -25,10 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         applyDockIcon()
-        if !flag {
-            mainWindow?.makeKeyAndOrderFront(nil)
-            sender.activate(ignoringOtherApps: true)
-        }
+        if !flag { MainWindow.showExisting() }
         return true
     }
 
@@ -53,6 +48,8 @@ struct MacPolishApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1_180, height: 760)
         .commands {
+            // Mac Polish has one main window; File › New Window would create unmanaged duplicates.
+            CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") {
                     Task { await model.updates.check() }

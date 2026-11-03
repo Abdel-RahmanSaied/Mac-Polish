@@ -62,6 +62,9 @@ struct ContentView: View {
                     StartupItemsView()
                 }
             }
+            // Detail column only: across the whole split view, the banner overlapped the sidebar
+            // header, which runs under the hidden title bar and does not take this inset into account.
+            .safeAreaInset(edge: .top, spacing: 0) { UpdateBanner(updates: model.updates) }
         }
         .modifier(AccessSetupPresenter(access: model.access))
         .sheet(isPresented: $model.showsCleanupDetails) {
@@ -71,7 +74,7 @@ struct ContentView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
-        .safeAreaInset(edge: .top, spacing: 0) { UpdateBanner(updates: model.updates) }
+        .background(MainWindowRegistration())
         .tint(.cyan)
         .alert(model.operationIssues.contains(where: \.needsAccess) ? "File access required" : "Mac Polish", isPresented: Binding(
             get: { model.operationMessage != nil },
@@ -227,6 +230,12 @@ private struct OverviewView: View {
                     }
                 }
                 if case .failed = model.state {
+                    Button("Review Scan Permissions…") { model.access.presented = true }
+                        .buttonStyle(.bordered)
+                } else if let warning = model.scanWarning, model.state == .finished {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                     Button("Review Scan Permissions…") { model.access.presented = true }
                         .buttonStyle(.bordered)
                 }
@@ -395,6 +404,17 @@ private struct ResultsView: View {
             }
             .padding(30)
 
+            if let warning = model.scanWarning, model.state == .finished {
+                HStack(spacing: 10) {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Review Scan Permissions…") { model.access.presented = true }
+                }
+                .padding(.horizontal, 30).padding(.bottom, 12)
+            }
+
             if case .failed(let message) = model.state {
                 ContentUnavailableView("Scan incomplete", systemImage: "exclamationmark.triangle", description: Text(message))
                 Button("Review Scan Permissions…") { model.access.presented = true }
@@ -450,7 +470,7 @@ private struct ResultsView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button("Move Selected to Trash") {
-                        model.cleanSelected(itemIDs: Set(filteredItems.map(\.id)))
+                        model.requestCleanup(itemIDs: Set(filteredItems.map(\.id)))
                     }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
@@ -459,6 +479,15 @@ private struct ResultsView: View {
                 .padding(20)
                 .background(.bar)
             }
+        }
+        .alert("Move selected items to Trash?", isPresented: Binding(
+            get: { model.pendingCleanup != nil },
+            set: { if !$0 { model.cancelCleanup() } }
+        )) {
+            Button("Cancel", role: .cancel) { model.cancelCleanup() }
+            Button("Move to Trash", role: .destructive) { model.confirmCleanup() }
+        } message: {
+            Text("Move \(model.pendingCleanup?.count ?? 0) selected item(s) (\(model.pendingCleanup?.bytes.formattedBytes ?? "")) to Trash. Close the apps that use these files first. Items that changed since the scan are skipped. Space is released when Trash is emptied.")
         }
     }
 
@@ -487,6 +516,8 @@ private struct ScanItemRow: View {
         HStack(spacing: 14) {
             Toggle("", isOn: binding)
                 .labelsHidden()
+                .disabled(item.category == .trash)
+                .help(item.category == .trash ? "Already in Trash. Empty Trash in Finder to release this space." : "")
             Image(systemName: item.category.icon)
                 .foregroundStyle(.cyan)
                 .frame(width: 40, height: 40)

@@ -1,41 +1,71 @@
 import Foundation
 
+extension DiskScanner {
+    /// Independently scanned parts of the basic scan. Each runs in its own worker with its own deadline.
+    enum Section: String, CaseIterable, Sendable {
+        case caches, logs, trash, developer, xcodeInstallers, oldFiles, downloads, documents, desktop
+
+        var displayName: String {
+            switch self {
+            case .caches: "User caches"
+            case .logs: "Logs"
+            case .trash: "Trash"
+            case .developer: "Developer files"
+            case .xcodeInstallers: "Xcode installers in Downloads"
+            case .oldFiles: "Old files"
+            case .downloads: "Downloads"
+            case .documents: "Documents"
+            case .desktop: "Desktop"
+            }
+        }
+
+        var isLargeFileFolder: Bool { [.downloads, .documents, .desktop].contains(self) }
+    }
+}
+
 struct DiskScanner: Sendable {
     private var fileManager: FileManager { .default }
     private let home: URL
     private let applicationsRoot: URL
+    private let largeFileMinimum: Int64
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
-         applicationsRoot: URL = URL(fileURLWithPath: "/Applications", isDirectory: true)) {
+         applicationsRoot: URL = URL(fileURLWithPath: "/Applications", isDirectory: true),
+         largeFileMinimum: Int64 = 100 * 1_024 * 1_024) {
         self.home = home
         self.applicationsRoot = applicationsRoot
+        self.largeFileMinimum = largeFileMinimum
     }
 
     func scan(includeLargeFiles: Bool = true) -> [ScanItem] {
-        var items: [ScanItem] = []
-        let home = self.home
+        let sections = Section.allCases.filter { includeLargeFiles || !$0.isLargeFileFolder }
+        return Self.sorted(sections.flatMap { scan(section: $0) })
+    }
 
-        items += scanChildren(of: home.appending(path: "Library/Caches"), category: .cache).filter {
-            !["com.apple.dt.Xcode", "org.swift.swiftpm"].contains($0.url.lastPathComponent)
+    func scan(section: Section) -> [ScanItem] {
+        switch section {
+        // Xcode and SwiftPM caches are reported by the developer section.
+        case .caches: scanChildren(of: home.appending(path: "Library/Caches"), category: .cache,
+                                   excluding: ["com.apple.dt.Xcode", "org.swift.swiftpm"])
+        case .logs: scanChildren(of: home.appending(path: "Library/Logs"), category: .logs, excluding: ["DiagnosticReports"])
+        case .trash: scanChildren(of: home.appending(path: ".Trash"), category: .trash)
+        case .developer: scanDeveloperFiles(in: home)
+        // Separate from .developer: Downloads can wait on a macOS access prompt.
+        case .xcodeInstallers: scanOldXcodeDownloads(in: home.appending(path: "Downloads"))
+        case .oldFiles: scanOldFiles(in: home)
+        case .downloads: scanLargeFiles(in: home.appending(path: "Downloads"), minimumSize: largeFileMinimum)
+        case .documents: scanLargeFiles(in: home.appending(path: "Documents"), minimumSize: largeFileMinimum)
+        case .desktop: scanLargeFiles(in: home.appending(path: "Desktop"), minimumSize: largeFileMinimum)
         }
-        items += scanChildren(of: home.appending(path: "Library/Logs"), category: .logs).filter {
-            $0.url.lastPathComponent != "DiagnosticReports"
-        }
-        items += scanChildren(of: home.appending(path: ".Trash"), category: .trash)
-        items += scanDeveloperFiles(in: home)
-        items += scanOldFiles(in: home)
+    }
 
-        if includeLargeFiles {
-            let roots = ["Downloads", "Documents", "Desktop"].map { home.appending(path: $0) }
-            items += roots.flatMap { scanLargeFiles(in: $0, minimumSize: 100 * 1_024 * 1_024) }
-        }
-
-        return items.sorted { lhs, rhs in
+    static func sorted(_ items: [ScanItem]) -> [ScanItem] {
+        items.sorted { lhs, rhs in
             if lhs.category == rhs.category { return lhs.size > rhs.size }
             return lhs.category.rawValue < rhs.category.rawValue
         }
     }
 
-    private func scanChildren(of root: URL, category: ScanCategory, isSelected: Bool? = nil) -> [ScanItem] {
+    private func scanChildren(of root: URL, category: ScanCategory, excluding excludedNames: Set<String> = []) -> [ScanItem] {
         guard let children = try? fileManager.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isSymbolicLinkKey, .contentModificationDateKey],
@@ -43,18 +73,25 @@ struct DiskScanner: Sendable {
         ) else { return [] }
 
         return children.compactMap { url -> ScanItem? in
-            guard !isSymbolicLink(url) else { return nil }
-            let size = allocatedSize(of: url)
-            guard size > 0 else { return nil }
+            guard !excludedNames.contains(url.lastPathComponent), !isSymbolicLink(url) else { return nil }
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-            return ScanItem(
-                url: url,
-                size: size,
-                category: category,
-                modifiedAt: values?.contentModificationDate,
-                isSelected: isSelected ?? (category != .largeFile)
-            )
+            return item(url: url, category: category, modifiedAt: values?.contentModificationDate)
         }
+    }
+
+    /// Measures the item and lets the shared cleanup policy decide whether it starts selected.
+    private func item(url: URL, category: ScanCategory, modifiedAt: Date?) -> ScanItem? {
+        let measurement = FileSizeCalculator.measure(url)
+        guard measurement.bytes > 0 else { return nil }
+        var item = ScanItem(
+            url: url,
+            size: measurement.bytes,
+            category: category,
+            modifiedAt: modifiedAt,
+            newestContentModifiedAt: measurement.newestModification
+        )
+        item.isSelected = CleanupPolicy.shouldPreselect(item)
+        return item
     }
 
     private func scanDeveloperFiles(in home: URL) -> [ScanItem] {
@@ -64,42 +101,35 @@ struct DiskScanner: Sendable {
         items += scanAgedChildren(
             of: developer.appending(path: "Xcode/DerivedData"),
             category: .derivedData,
-            olderThanDays: 30,
-            isSelected: true
+            olderThanDays: 30
         )
         items += scanAgedChildren(
             of: developer.appending(path: "Xcode/Archives"),
             category: .xcodeArchive,
-            olderThanDays: 180,
-            isSelected: false
+            olderThanDays: 180
         )
 
         for platform in ["iOS", "watchOS", "tvOS"] {
             items += scanAgedChildren(
                 of: developer.appending(path: "Xcode/\(platform) DeviceSupport"),
                 category: .deviceSupport,
-                olderThanDays: 180,
-                isSelected: false
+                olderThanDays: 180
             )
         }
 
         items += scanChildren(
             of: developer.appending(path: "CoreSimulator/Caches"),
-            category: .simulatorCache,
-            isSelected: true
+            category: .simulatorCache
         )
         items += scanChildren(
             of: home.appending(path: "Library/Caches/com.apple.dt.Xcode"),
-            category: .xcodeCache,
-            isSelected: true
+            category: .xcodeCache
         )
         items += scanChildren(
             of: home.appending(path: "Library/Caches/org.swift.swiftpm"),
-            category: .xcodeCache,
-            isSelected: true
+            category: .xcodeCache
         )
         items += scanOldXcodeCopies()
-        items += scanOldXcodeDownloads(in: home.appending(path: "Downloads"))
 
         return items
     }
@@ -113,9 +143,10 @@ struct DiskScanner: Sendable {
         ) else { return [] }
 
         let copies: [(url: URL, version: String)] = urls.compactMap { url in
+            // Match bundle identity, not the name: tools such as Xcodes.app are not Xcode copies.
             guard url.pathExtension.lowercased() == "app",
-                  url.deletingPathExtension().lastPathComponent.lowercased().hasPrefix("xcode") else { return nil }
-            let version = Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+                  let bundle = Bundle(url: url), bundle.bundleIdentifier == "com.apple.dt.Xcode" else { return nil }
+            let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
             return (url, version)
         }
         guard copies.count > 1 else { return [] }
@@ -166,14 +197,12 @@ struct DiskScanner: Sendable {
         var items = scanAgedChildren(
             of: home.appending(path: "Library/Logs/DiagnosticReports"),
             category: .diagnostics,
-            olderThanDays: 30,
-            isSelected: true
+            olderThanDays: 30
         )
         items += scanAgedChildren(
             of: home.appending(path: "Library/Application Support/MobileSync/Backup"),
             category: .deviceBackup,
-            olderThanDays: 180,
-            isSelected: false
+            olderThanDays: 180
         )
 
         let applications = applicationsRoot
@@ -203,8 +232,7 @@ struct DiskScanner: Sendable {
     private func scanAgedChildren(
         of root: URL,
         category: ScanCategory,
-        olderThanDays: Int,
-        isSelected: Bool
+        olderThanDays: Int
     ) -> [ScanItem] {
         guard let children = try? fileManager.contentsOfDirectory(
             at: root,
@@ -218,44 +246,40 @@ struct DiskScanner: Sendable {
                   let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
                   let modifiedAt = values.contentModificationDate,
                   modifiedAt < cutoff else { return nil }
-            let size = allocatedSize(of: url)
-            guard size > 0 else { return nil }
-            return ScanItem(
-                url: url,
-                size: size,
-                category: category,
-                modifiedAt: modifiedAt,
-                isSelected: isSelected
-            )
+            return item(url: url, category: category, modifiedAt: modifiedAt)
         }
     }
 
+    /// Files and packages (apps, libraries, bundles) at least `minimumSize`, hidden ones included.
+    /// Hidden folders such as `.git` are not entered: their files belong to the folder and are not offered alone.
     private func scanLargeFiles(in root: URL, minimumSize: Int64) -> [ScanItem] {
-        let keys: [URLResourceKey] = [
-            .isRegularFileKey,
-            .isSymbolicLinkKey,
-            .fileAllocatedSizeKey,
-            .totalFileAllocatedSizeKey,
-            .contentModificationDateKey
-        ]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isHiddenKey, .isSymbolicLinkKey, .contentModificationDateKey]
         guard let enumerator = fileManager.enumerator(
             at: root,
-            includingPropertiesForKeys: nil,
-            options: [.skipsPackageDescendants, .skipsHiddenFiles]
+            includingPropertiesForKeys: keys,
+            options: [.skipsPackageDescendants]
         ) else { return [] }
 
         var items: [ScanItem] = []
         for case let url as URL in enumerator {
-            guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
-                  attributes[.type] as? FileAttributeType == .typeRegular else { continue }
-            guard let values = try? url.resourceValues(forKeys: Set(keys)),
-                  values.isRegularFile == true,
-                  values.isSymbolicLink != true else { continue }
-            let size = Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
-            guard size >= minimumSize else { continue }
+            guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { continue }
+            if values.isDirectory == true {
+                if values.isPackage == true {
+                    if let item = item(url: url, category: .largeFile, modifiedAt: values.contentModificationDate),
+                       item.size >= minimumSize {
+                        items.append(item)
+                    }
+                } else if values.isHidden == true || url.lastPathComponent.hasPrefix(".") {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            // Regular files only: pipes, sockets and devices are never measured or offered.
+            guard let attributes = FileAttributes.read(path: url.path), attributes.kind == .file,
+                  attributes.attributedBytes >= minimumSize else { continue }
             items.append(ScanItem(
                 url: url,
-                size: size,
+                size: attributes.attributedBytes,
                 category: .largeFile,
                 modifiedAt: values.contentModificationDate,
                 isSelected: false
@@ -275,6 +299,10 @@ struct DiskScanner: Sendable {
 
 struct SafeCleaner: Sendable {
     private var fileManager: FileManager { .default }
+    private let applicationsRoot: URL
+    init(applicationsRoot: URL = URL(fileURLWithPath: "/Applications", isDirectory: true)) {
+        self.applicationsRoot = applicationsRoot
+    }
 
     func clean(_ items: [ScanItem], trashItem: @Sendable (URL) throws -> Void = { url in
         _ = try FileManager.default.trashItem(at: url, resultingItemURL: nil)
@@ -286,6 +314,13 @@ struct SafeCleaner: Sendable {
         var removedItemIDs: Set<UUID> = []
 
         for item in items where item.isSelected {
+            guard item.category != .trash else {
+                let issue = CleanupIssue(url: item.url, kind: .alreadyInTrash,
+                                         detail: "Already in Trash. Empty Trash in Finder to release this space.")
+                failures.append(issue.message)
+                issues.append(issue)
+                continue
+            }
             guard isAllowed(item) else {
                 let issue = CleanupIssue(url: item.url, kind: .unsafe, detail: "Blocked unsafe path.")
                 failures.append(issue.message)
@@ -302,6 +337,14 @@ struct SafeCleaner: Sendable {
                let current = try? fileManager.attributesOfItem(atPath: item.url.path)[.modificationDate] as? Date,
                current != expected {
                 let issue = CleanupIssue(url: item.url, kind: .changed, detail: "The item changed after scanning. Scan again before cleaning it.")
+                failures.append(issue.message)
+                issues.append(issue)
+                continue
+            }
+            // Folder dates miss edits deep inside; compare the newest content date recorded by the scan.
+            if let recordedNewest = item.newestContentModifiedAt,
+               (FileSizeCalculator.measure(item.url).newestModification ?? .distantFuture) > recordedNewest {
+                let issue = CleanupIssue(url: item.url, kind: .changed, detail: "Content inside this item changed after scanning. Scan again before cleaning it.")
                 failures.append(issue.message)
                 issues.append(issue)
                 continue
@@ -334,7 +377,6 @@ struct SafeCleaner: Sendable {
         let roots = [
             home.appending(path: "Library/Caches"),
             home.appending(path: "Library/Logs"),
-            home.appending(path: ".Trash"),
             home.appending(path: "Downloads"),
             home.appending(path: "Documents"),
             home.appending(path: "Desktop"),
@@ -352,12 +394,15 @@ struct SafeCleaner: Sendable {
     private func isAllowed(_ item: ScanItem) -> Bool {
         guard TrashValidation.isUnredirected(item.url) else { return false }
         if isAllowed(item.url) { return true }
+        let applications = applicationsRoot.standardizedFileURL.path
         if item.category == .oldXcode {
-            let path = item.url.standardizedFileURL.path
-            return path.hasPrefix("/Applications/Xcode") && path.hasSuffix(".app")
+            // Same identity rule as the scanner: a direct .app child of Applications that is really Xcode.
+            let url = item.url.standardizedFileURL
+            return url.deletingLastPathComponent().path == applications && url.pathExtension == "app"
+                && Bundle(url: url)?.bundleIdentifier == "com.apple.dt.Xcode"
         }
         guard item.category == .oldInstaller else { return false }
         let path = item.url.standardizedFileURL.path
-        return path.hasPrefix("/Applications/Install macOS ") && path.hasSuffix(".app")
+        return path.hasPrefix(applications + "/Install macOS ") && path.hasSuffix(".app")
     }
 }

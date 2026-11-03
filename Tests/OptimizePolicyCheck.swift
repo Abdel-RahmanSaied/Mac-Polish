@@ -31,13 +31,22 @@ enum OptimizePolicyCheck {
         precondition(SystemDataScanner.dockerBuildCacheBytes("Local Volumes 12 4 5.289GB 5.007GB") == nil)
         precondition(SystemDataScanner.dockerBuildCacheBytes("Build Cache 1 0 broken 0B") == nil)
         precondition(SystemDataScanner.dockerBuildCacheBytes("Build Cache 1 0 -5GB 0B") == nil)
-        precondition(SystemDataScanner.measurementStatus(status: 1, output: "du: /private: Operation not permitted", hasTotal: true).contains("Access restricted"))
-        precondition(SystemDataScanner.measurementStatus(status: -1, output: "", hasTotal: false).contains("timed out"))
-        let measured = SystemDataScanner.measure(name: "Fixture", url: root, note: "")
-        precondition(!measured.partial && measured.bytes != nil)
-        let missing = SystemDataScanner.measure(name: "Missing", url: root.appending(path: "missing"), note: "")
+        // System Data measures in-process here; the app uses the read-only worker.
+        let reader = DiskMapService.inProcessReader
+        let measured = SystemDataScanner.measure(name: "Fixture", url: root, note: "", reader: reader)
+        precondition(!measured.partial && measured.bytes == FileSizeCalculator.allocatedSize(of: root) && measured.children.count <= 6)
+        let missing = SystemDataScanner.measure(name: "Missing", url: root.appending(path: "missing"), note: "", reader: reader)
         precondition(missing.partial && missing.bytes == nil && missing.diagnostic.contains("missing"))
-        precondition(SystemDataScanner.parseDU("du: denied\n4\t/tmp/folder with spaces\n-1\t/tmp/invalid").count == 1)
+        let locked = root.appending(path: "locked-area")
+        try fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        let restricted = SystemDataScanner.measure(name: "Restricted", url: root, note: "", reader: reader)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+        precondition(restricted.partial && restricted.bytes != nil && restricted.diagnostic.contains("Full Disk Access"))
+        let late = SystemDataScanner.measure(name: "Late", url: root, note: "") { _, _, _ in
+            .failure(DiskScanFailure(message: "late", timedOut: true))
+        }
+        precondition(late.partial && late.bytes == nil && late.diagnostic.contains("timed out"))
         let optimizer = OptimizerModel()
         optimizer.includeDocker = true
         precondition(!optimizer.hasActions)

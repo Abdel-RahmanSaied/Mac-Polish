@@ -89,6 +89,9 @@ struct ScanItem: Identifiable, Hashable, Sendable, Codable {
     let size: Int64
     let category: ScanCategory
     let modifiedAt: Date?
+    /// Newest modification date of the item or anything inside it. A folder's own date only
+    /// changes when direct entries are added or removed, so it cannot show recent use alone.
+    let newestContentModifiedAt: Date?
     var isSelected: Bool
 
     init(
@@ -97,6 +100,7 @@ struct ScanItem: Identifiable, Hashable, Sendable, Codable {
         size: Int64,
         category: ScanCategory,
         modifiedAt: Date?,
+        newestContentModifiedAt: Date? = nil,
         isSelected: Bool = true
     ) {
         self.id = id
@@ -104,6 +108,7 @@ struct ScanItem: Identifiable, Hashable, Sendable, Codable {
         self.size = size
         self.category = category
         self.modifiedAt = modifiedAt
+        self.newestContentModifiedAt = newestContentModifiedAt
         self.isSelected = isSelected
     }
 
@@ -159,13 +164,6 @@ struct DuplicateGroup: Identifiable, Sendable {
     var reclaimableSize: Int64 { fileSize * Int64(max(0, files.count - 1)) }
 }
 
-struct StorageEntry: Identifiable, Hashable, Sendable, Codable {
-    let id: UUID
-    let name: String
-    let url: URL
-    let size: Int64
-}
-
 struct StartupEntry: Identifiable, Hashable, Sendable, Codable {
     let id: UUID
     let label: String
@@ -177,7 +175,7 @@ struct StartupEntry: Identifiable, Hashable, Sendable, Codable {
 
 struct CleanupIssue: Identifiable, Equatable, Sendable {
     enum Kind: String, Sendable {
-        case permission, managedCache, locked, readOnly, missing, unsafe, changed, other
+        case permission, managedCache, locked, readOnly, missing, unsafe, changed, alreadyInTrash, other
     }
     var id: String { url.path + ":" + kind.rawValue }
     let url: URL

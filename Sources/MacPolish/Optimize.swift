@@ -11,18 +11,20 @@ struct OptimizeCandidate: Identifiable, Sendable {
 }
 
 enum OptimizePolicy {
-    static let categories: Set<ScanCategory> = [.cache, .logs, .derivedData, .xcodeCache, .simulatorCache, .diagnostics]
+    static let categories = CleanupPolicy.suggestedCategories
 
     static func candidate(_ item: ScanItem, now: Date = Date()) -> OptimizeCandidate? {
-        guard categories.contains(item.category), item.size > 0 else { return nil }
-        let excluded = ["go-build", "gomodcache", "node_modules", "org.swift.swiftpm", "codex", "docker"]
-        guard !excluded.contains(where: { item.url.path.lowercased().contains($0) }),
+        guard categories.contains(item.category), item.size > 0, !CleanupPolicy.isProtected(item.url),
               item.url.standardizedFileURL == item.url.resolvingSymlinksInPath().standardizedFileURL,
               let attributes = try? FileManager.default.attributesOfItem(atPath: item.url.path),
-              let modified = attributes[.modificationDate] as? Date,
-              now.timeIntervalSince(modified) > 7 * 86400 else { return nil }
+              let modified = attributes[.modificationDate] as? Date else { return nil }
+        // A folder's own date ignores edits inside it; require the scanned content date for folders.
+        let isDirectory = attributes[.type] as? FileAttributeType == .typeDirectory
+        if isDirectory && item.newestContentModifiedAt == nil { return nil }
+        let newest = max(modified, item.newestContentModifiedAt ?? modified)
+        guard CleanupPolicy.isStale(newest: newest, now: now) else { return nil }
         return OptimizeCandidate(item: item,
-                                 reason: "Cache or log; last modified more than 7 days ago. Apps may recreate it.",
+                                 reason: "Cache or log; nothing inside changed for more than 7 days. Apps may recreate it.",
                                  scannedModification: modified)
     }
 
@@ -48,6 +50,8 @@ final class OptimizerModel: ObservableObject {
     @Published var totalBytes: Int64?
     @Published var coverage = ""
     @Published var recommendationWarning: String?
+    /// True when no scan section could be read, so no recommendations exist at all.
+    @Published var recommendationsUnavailable = false
     @Published var reviewCount = 0
     @Published var includeDocker = false
     @Published var confirm = false
@@ -55,6 +59,7 @@ final class OptimizerModel: ObservableObject {
     @Published var cleanupIssues: [CleanupIssue] = []
     @Published var completed = false
     var onOutcome: (@MainActor (CleanupOutcome) -> Void)?
+    var onDiskMap: (@MainActor (DiskMapReport) -> Void)?
     var selectedBytes: Int64 { candidates.filter(\.selected).reduce(0) { $0 + $1.item.size } }
     var selectedCount: Int { candidates.filter(\.selected).count }
     var hasActions: Bool { selectedCount > 0 || (includeDocker && dockerAvailable) }
@@ -80,43 +85,62 @@ final class OptimizerModel: ObservableObject {
         reviewCount = 0
         coverage = ""
         recommendationWarning = nil
+        recommendationsUnavailable = false
         refreshCapacity()
-        phase = "Inspecting accessible folders across the Mac…"
+        phase = "Mapping the whole startup disk…"
         Task {
-            let disk = await Task.detached(priority: .utility) {
-                SystemDataScanner.run("/usr/bin/du", ["-x", "-k", "-d", "1", "/System/Volumes/Data"], timeout: 90, captureErrors: true)
-            }.value
-            diskAreas = SystemDataScanner.parseDU(disk.output)
-                .filter { $0.url.path != "/System/Volumes/Data" }
-                .sorted { $0.bytes > $1.bytes }
-            coverage = disk.status == 0
-                ? "Measured the accessible startup data volume. External drives are not included."
-                : SystemDataScanner.measurementStatus(status: disk.status, output: disk.output, hasTotal: false) + " External drives are not included."
+            let map = await BackgroundWork.run(qos: .utility) { DiskMapService.scan() }
+            switch map {
+            case .success(let report):
+                onDiskMap?(report)
+                diskAreas = report.tree.root.children.filter { $0.kind != .smallerItems && $0.bytes > 0 }.prefix(12)
+                    .map { SystemDataChild(url: DiskMapService.revealURL([$0.name]), bytes: $0.bytes) }
+                coverage = Self.coverageText(report)
+            case .failure(let failure):
+                coverage = failure.message + " External drives are not included."
+            }
             phase = "Analyzing system data, developer storage and Docker…"
-            report = await Task.detached(priority: .utility) { SystemDataScanner().scan() }.value
+            report = await BackgroundWork.run(qos: .utility) { SystemDataScanner().scan() }
             phase = "Measuring locations for manual review…"
-            reviewAreas = await Task.detached(priority: .utility) {
+            reviewAreas = await BackgroundWork.run(qos: .utility) {
                 let home = FileManager.default.homeDirectoryForCurrentUser
-                return [("Trash", home.appending(path: ".Trash"), "Review in Finder. Emptying Trash permanently removes its contents."),
-                        ("Downloads", home.appending(path: "Downloads"), "Review installers and downloads you no longer need."),
-                        ("Documents", home.appending(path: "Documents"), "Personal files and projects; review individually."),
-                        ("Applications", URL(fileURLWithPath: "/Applications"), "Review unused apps in Applications; app data may remain elsewhere.")]
-                    .map { SystemDataScanner.measure(name: $0.0, url: $0.1, note: $0.2) }
-            }.value
+                let specs = [SystemDataScanner.Spec(name: "Trash", url: home.appending(path: ".Trash"), note: "Review in Finder. Emptying Trash permanently removes its contents."),
+                             SystemDataScanner.Spec(name: "Downloads", url: home.appending(path: "Downloads"), note: "Review installers and downloads you no longer need."),
+                             SystemDataScanner.Spec(name: "Documents", url: home.appending(path: "Documents"), note: "Personal files and projects; review individually."),
+                             SystemDataScanner.Spec(name: "Applications", url: URL(fileURLWithPath: "/Applications"), note: "Review unused apps in Applications; app data may remain elsewhere.")]
+                return SystemDataScanner.measureAll(specs) { SystemDataScanner.measure(name: $0.name, url: $0.url, note: $0.note) }
+            }
             refreshCapacity()
             phase = "Preparing cleanup recommendations…"
-            let found = await Task.detached(priority: .utility) { DiskScanService.scan() }.value
+            // Policy checks stat every item, so they run with the scan instead of on the main thread.
+            let found = await BackgroundWork.run(qos: .utility) {
+                DiskScanService.scan().map { outcome in
+                    (outcome, outcome.items.compactMap { OptimizePolicy.candidate($0) }.sorted { $0.item.size > $1.item.size })
+                }
+            }
             switch found {
-            case .success(let items):
-                candidates = items.compactMap { OptimizePolicy.candidate($0) }.sorted { $0.item.size > $1.item.size }
-                reviewCount = items.filter { !OptimizePolicy.categories.contains($0.category) && $0.category != .trash }.count
-                phase = "Review your optimization plan"
+            case .success(let (outcome, suggested)):
+                candidates = suggested
+                reviewCount = outcome.items.filter { !OptimizePolicy.categories.contains($0.category) && $0.category != .trash }.count
+                recommendationWarning = outcome.warning
+                phase = outcome.incomplete.isEmpty ? "Review your optimization plan" : "Review your optimization plan · some locations were not read"
             case .failure(let failure):
                 recommendationWarning = failure.message
+                recommendationsUnavailable = true
                 phase = "Scan incomplete — review access or try again"
             }
             busy = false
         }
+    }
+
+    static func coverageText(_ report: DiskMapReport) -> String {
+        guard let check = report.reconciliation else {
+            return "Measured the startup data volume. External drives are not included."
+        }
+        var text = "Found \(check.found.formattedBytes) of the \(check.dataUsed.formattedBytes) used on the startup data volume "
+            + "(\(Int((check.coverage * 100).rounded(.down)))%). "
+        if check.unexplained > 0 { text += "\(check.unexplained.formattedBytes) is in folders Mac Polish could not read, snapshots or file system overhead. " }
+        return text + "External drives are not included. See Storage Map for details."
     }
 
     func execute() {
@@ -130,7 +154,7 @@ final class OptimizerModel: ObservableObject {
         confirm = false
         phase = "Moving reviewed cache and log files to Trash…"
         Task {
-            let outcome = await Task.detached(priority: .utility) { () -> (messages: [String], issues: [CleanupIssue], removedIDs: Set<UUID>, movedBytes: Int64) in
+            let outcome = await BackgroundWork.run(qos: .utility) { () -> (messages: [String], issues: [CleanupIssue], removedIDs: Set<UUID>, movedBytes: Int64) in
                 var messages: [String] = []
                 var safe: [ScanItem] = []
                 for candidate in plan {
@@ -146,21 +170,21 @@ final class OptimizerModel: ObservableObject {
                 messages.insert("Moved \(result.removedCount) items (\(result.reclaimedBytes.formattedBytes)) to Trash. Space is released after Trash is emptied.", at: 0)
                 if !result.issues.isEmpty { messages.append(CleanupIssue.summary(result.issues)) }
                 return (messages, result.issues, result.removedItemIDs, result.reclaimedBytes)
-            }.value
+            }
             results = outcome.messages
             cleanupIssues = outcome.issues
             onOutcome?(CleanupOutcome(date: Date(), movedCount: outcome.removedIDs.count, movedBytes: outcome.movedBytes, issues: outcome.issues))
             if docker {
                 phase = "Cleaning Docker build cache…"
-                let message = await Task.detached(priority: .utility) {
+                let message = await BackgroundWork.run(qos: .utility) {
                     SystemDataScanner.cleanDockerBuildCache()
-                }.value
+                }
                 results.append(message)
             }
             phase = "Updating storage measurements…"
             // Keep recovery responsive instead of waiting for another full scan after access failures.
             if cleanupIssues.isEmpty || docker {
-                report = await Task.detached(priority: .utility) { SystemDataScanner().scan() }.value
+                report = await BackgroundWork.run(qos: .utility) { SystemDataScanner().scan() }
             }
             refreshCapacity()
             if let beforeFree, let afterFree = freeBytes {
@@ -230,7 +254,7 @@ struct OptimizeView: View {
                         Label(optimizer.coverage, systemImage: "info.circle").font(.caption)
                     }
                     if !optimizer.diskAreas.isEmpty {
-                        DisclosureGroup("Disk usage · accessible folders") {
+                        DisclosureGroup("Disk usage · whole startup disk") {
                             ForEach(optimizer.diskAreas) { area in
                                 HStack {
                                     Text(area.url.lastPathComponent)
@@ -261,9 +285,9 @@ struct OptimizeView: View {
                             Text("\(optimizer.selectedBytes.formattedBytes) selected").foregroundStyle(.secondary)
                         }
                         if optimizer.candidates.isEmpty {
-                            Text(optimizer.recommendationWarning == nil
-                                 ? "No eligible older caches or logs were found in accessible locations. This is not a complete bill of health; review scan coverage and large locations."
-                                 : "Cleanup recommendations are unavailable for this scan. Review access and try again.")
+                            Text(optimizer.recommendationsUnavailable
+                                 ? "Cleanup recommendations are unavailable for this scan. Review access and try again."
+                                 : "No eligible older caches or logs were found in the locations that could be read. This is not a complete bill of health; review scan coverage and large locations.")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach($optimizer.candidates) { $candidate in
