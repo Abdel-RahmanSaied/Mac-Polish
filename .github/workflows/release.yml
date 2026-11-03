@@ -1,0 +1,28 @@
+name: Package release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Regression checks
+        run: Scripts/test.sh
+      - name: Build and verify Apple Silicon package
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          Scripts/package-release.sh
+          bash -n dist/install.sh
+          git diff --check
+      - name: Publish preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "Mac Polish $GITHUB_REF_NAME — Storage Map & Safer Cleanup" --notes-file docs/release-0.9.0.md dist/Mac-Polish-*-macos-arm64.zip dist/install.sh dist/SHA256SUMS.txt

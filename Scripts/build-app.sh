@@ -9,10 +9,11 @@ CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 
 cd "$PROJECT_ROOT"
-swift build -c release
+swift build -c release --arch arm64
+BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
 
 mkdir -p "$MACOS_DIR" "$CONTENTS_DIR/Resources"
-cp "$PROJECT_ROOT/.build/release/MacPolish" "$MACOS_DIR/MacPolish"
+cp "$BIN_DIR/MacPolish" "$MACOS_DIR/MacPolish"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$PROJECT_ROOT/Resources/AppIcon.icns" "$CONTENTS_DIR/Resources/AppIcon.icns"
 

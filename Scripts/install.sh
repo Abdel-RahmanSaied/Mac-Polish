@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Pinned release: review this script before running it.
-VERSION="0.8.0"
+VERSION="0.9.0"
 REPOSITORY="Abdel-RahmanSaied/Mac-Polish"
 ASSET="Mac-Polish-${VERSION}-macos-arm64.zip"
 BASE_URL="https://github.com/${REPOSITORY}/releases/download/v${VERSION}"
