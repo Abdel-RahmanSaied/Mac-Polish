@@ -14,7 +14,7 @@ enum OptimizePolicy {
     static let categories = CleanupPolicy.suggestedCategories
 
     static func candidate(_ item: ScanItem, now: Date = Date()) -> OptimizeCandidate? {
-        guard categories.contains(item.category), item.size > 0, !CleanupPolicy.isProtected(item.url),
+        guard item.isMeasurementComplete, categories.contains(item.category), item.size > 0, !CleanupPolicy.isProtected(item.url),
               item.url.standardizedFileURL == item.url.resolvingSymlinksInPath().standardizedFileURL,
               let attributes = try? FileManager.default.attributesOfItem(atPath: item.url.path),
               let modified = attributes[.modificationDate] as? Date else { return nil }

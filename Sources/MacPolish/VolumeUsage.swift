@@ -7,6 +7,7 @@ struct VolumeUsage: Sendable, Equatable {
         let name: String
         let role: String
         let bytes: Int64
+        var deviceIdentifier: String = ""
     }
 
     struct Failure: Error, Sendable {
@@ -16,12 +17,13 @@ struct VolumeUsage: Sendable, Equatable {
     let capacity: Int64
     let free: Int64
     let volumes: [Volume]
+    var dataDevice: String? = nil
     var snapshotCount = 0
     /// Space macOS can free on demand (caches, optimized storage); already counted as used.
     var purgeable: Int64?
 
     var used: Int64 { capacity - free }
-    var dataBytes: Int64? { volumes.first { $0.role == "Data" }?.bytes }
+    var dataBytes: Int64? { volumes.first { $0.role == "Data" && (dataDevice == nil || $0.deviceIdentifier == dataDevice) }?.bytes }
     /// The sealed system volume and the volumes that start and update macOS.
     var macOSBytes: Int64 { volumes.filter { ["System", "Preboot", "Recovery", "Update"].contains($0.role) }.reduce(0) { $0 + $1.bytes } }
     var virtualMemoryBytes: Int64 { volumes.filter { $0.role == "VM" }.reduce(0) { $0 + $1.bytes } }
@@ -41,9 +43,10 @@ struct VolumeUsage: Sendable, Equatable {
             let parsed = volumes.map { volume in
                 Volume(name: volume["Name"] as? String ?? "Volume",
                        role: (volume["Roles"] as? [String])?.first ?? "",
-                       bytes: (volume["CapacityInUse"] as? NSNumber)?.int64Value ?? 0)
+                       bytes: (volume["CapacityInUse"] as? NSNumber)?.int64Value ?? 0,
+                       deviceIdentifier: volume["DeviceIdentifier"] as? String ?? "")
             }
-            return .success(VolumeUsage(capacity: capacity, free: free, volumes: parsed))
+            return .success(VolumeUsage(capacity: capacity, free: free, volumes: parsed, dataDevice: dataDevice))
         }
         return .failure(Failure(message: "The data volume was not found in the disk layout."))
     }

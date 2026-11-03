@@ -88,7 +88,8 @@ struct DiskScanner: Sendable {
             size: measurement.bytes,
             category: category,
             modifiedAt: modifiedAt,
-            newestContentModifiedAt: measurement.newestModification
+            newestContentModifiedAt: measurement.newestModification,
+            isMeasurementComplete: measurement.unreadableFolders == 0
         )
         item.isSelected = CleanupPolicy.shouldPreselect(item)
         return item
@@ -342,12 +343,22 @@ struct SafeCleaner: Sendable {
                 continue
             }
             // Folder dates miss edits deep inside; compare the newest content date recorded by the scan.
-            if let recordedNewest = item.newestContentModifiedAt,
-               (FileSizeCalculator.measure(item.url).newestModification ?? .distantFuture) > recordedNewest {
-                let issue = CleanupIssue(url: item.url, kind: .changed, detail: "Content inside this item changed after scanning. Scan again before cleaning it.")
-                failures.append(issue.message)
-                issues.append(issue)
-                continue
+            if item.newestContentModifiedAt != nil || !item.isMeasurementComplete {
+                let measurement = FileSizeCalculator.measure(item.url)
+                guard item.isMeasurementComplete, measurement.unreadableFolders == 0,
+                      let currentNewest = measurement.newestModification else {
+                    let issue = CleanupIssue(url: item.url, kind: .changed,
+                                             detail: "Could not verify all content inside this item. Check folder access and scan again before cleaning it.")
+                    failures.append(issue.message)
+                    issues.append(issue)
+                    continue
+                }
+                if let recordedNewest = item.newestContentModifiedAt, currentNewest > recordedNewest {
+                    let issue = CleanupIssue(url: item.url, kind: .changed, detail: "Content inside this item changed after scanning. Scan again before cleaning it.")
+                    failures.append(issue.message)
+                    issues.append(issue)
+                    continue
+                }
             }
             do {
                 try trashItem(item.url)

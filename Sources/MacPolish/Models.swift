@@ -92,6 +92,8 @@ struct ScanItem: Identifiable, Hashable, Sendable, Codable {
     /// Newest modification date of the item or anything inside it. A folder's own date only
     /// changes when direct entries are added or removed, so it cannot show recent use alone.
     let newestContentModifiedAt: Date?
+    /// False when any part of the item could not be measured.
+    let isMeasurementComplete: Bool
     var isSelected: Bool
 
     init(
@@ -101,6 +103,7 @@ struct ScanItem: Identifiable, Hashable, Sendable, Codable {
         category: ScanCategory,
         modifiedAt: Date?,
         newestContentModifiedAt: Date? = nil,
+        isMeasurementComplete: Bool = true,
         isSelected: Bool = true
     ) {
         self.id = id
@@ -108,6 +111,7 @@ struct ScanItem: Identifiable, Hashable, Sendable, Codable {
         self.size = size
         self.category = category
         self.modifiedAt = modifiedAt
+        self.isMeasurementComplete = isMeasurementComplete
         self.newestContentModifiedAt = newestContentModifiedAt
         self.isSelected = isSelected
     }

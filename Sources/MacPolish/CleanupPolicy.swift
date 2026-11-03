@@ -23,7 +23,7 @@ enum CleanupPolicy {
     }
 
     static func shouldPreselect(_ item: ScanItem, now: Date = Date()) -> Bool {
-        suggestedCategories.contains(item.category) && !isProtected(item.url)
+        item.isMeasurementComplete && suggestedCategories.contains(item.category) && !isProtected(item.url)
             && isStale(newest: item.newestContentModifiedAt, now: now)
     }
 }

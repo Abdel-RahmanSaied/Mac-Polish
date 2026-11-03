@@ -283,8 +283,7 @@ enum FileSizeCalculator {
     /// Walks the item on its own volume without following symbolic links or entering mount points.
     static func measure(_ url: URL) -> SizeMeasurement {
         guard let item = FileAttributes.read(path: url.path) else {
-            let denied = errno == EACCES || errno == EPERM
-            return SizeMeasurement(bytes: 0, newestModification: nil, unreadableFolders: denied ? 1 : 0)
+            return SizeMeasurement(bytes: 0, newestModification: nil, unreadableFolders: 1)
         }
         switch item.kind {
         case .file: return SizeMeasurement(bytes: item.attributedBytes, newestModification: item.modified)
@@ -299,7 +298,8 @@ enum FileSizeCalculator {
         while let folder = pending.popLast() {
             let listing = BulkDirectoryReader.entries(of: folder)
             if listing.error != nil { unreadable += 1 }
-            for entry in listing.entries where entry.error == 0 {
+            for entry in listing.entries {
+                guard entry.error == 0 else { unreadable += 1; continue }
                 // Sub-folder dates record files added or removed inside them.
                 if entry.kind == .file || entry.kind == .folder, let modified = entry.modified,
                    modified > (newest ?? .distantPast) {

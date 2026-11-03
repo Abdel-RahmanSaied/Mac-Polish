@@ -62,6 +62,18 @@ enum CleanupPolicyCheck {
         try makeApp("Xcode-15", identifier: "com.apple.dt.Xcode", version: "15.4")
         try makeApp("Xcodes", identifier: "com.robotsandpencils.XcodesApp", version: "2.4.1")
 
+        // A fresh file hidden behind an unreadable directory must never look stale.
+        let partial = caches.appending(path: "com.example.partial")
+        let vault = partial.appending(path: "vault")
+        try write(partial.appending(path: "old.bin"))
+        try write(vault.appending(path: "active.bin"))
+        try age(partial.appending(path: "old.bin"), vault.appending(path: "active.bin"), vault, partial)
+        let handle = try FileHandle(forWritingTo: vault.appending(path: "active.bin"))
+        try handle.write(contentsOf: Data("active".utf8))
+        try handle.close()
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: vault.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: vault.path) }
+
         let items = DiskScanner(home: home, applicationsRoot: applications).scan(includeLargeFiles: false)
         func item(_ url: URL) -> ScanItem {
             guard let found = items.first(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) else {
@@ -75,6 +87,23 @@ enum CleanupPolicyCheck {
         precondition(OptimizePolicy.candidate(item(active)) == nil, "Optimize must not call an actively written cache old")
         precondition(item(stale).isSelected, "A cache whose content is all old stays pre-selected")
         precondition(OptimizePolicy.candidate(item(stale)) != nil, "Optimize still suggests a cache whose content is all old")
+
+        precondition(!item(partial).isMeasurementComplete && !item(partial).isSelected)
+        precondition(OptimizePolicy.candidate(item(partial)) == nil)
+        var selectedPartial = item(partial)
+        selectedPartial.isSelected = true
+        let deniedCalls = CallRecorder()
+        let denied = SafeCleaner().clean([selectedPartial]) { deniedCalls.add($0) }
+        precondition(denied.removedCount == 0 && deniedCalls.count == 0 && !denied.issues.isEmpty)
+
+        // Also catch access lost after an otherwise complete scan.
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: stale.appending(path: "sub").path)
+        let lostAccess = SafeCleaner().clean([item(stale)]) { deniedCalls.add($0) }
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stale.appending(path: "sub").path)
+        precondition(lostAccess.removedCount == 0 && deniedCalls.count == 0 && !lostAccess.issues.isEmpty)
+        let encoded = try JSONEncoder().encode(selectedPartial)
+        let decoded = try JSONDecoder().decode(ScanItem.self, from: encoded)
+        precondition(!decoded.isMeasurementComplete)
 
         // Break caught: treating stateful tool folders like disposable caches.
         precondition(!item(poetry).isSelected, "Poetry virtual environments must not be pre-selected")

@@ -33,6 +33,18 @@ enum VolumeUsageCheck {
         precondition((try? VolumeUsage.parse(apfsList: Data("not a plist".utf8), dataDevice: "disk3s5").get()) == nil)
         precondition(VolumeUsage.deviceIdentifier(fromMountSource: "/dev/disk3s5") == "disk3s5")
 
+        // Both Data volumes share one container, but only disk3s5 is the startup Data volume.
+        let dualBoot: [String: Any] = ["Containers": [[
+            "CapacityCeiling": 1000, "CapacityFree": 200,
+            "Volumes": [volume("Old Data", "Data", "disk3s1", 100),
+                        volume("Current Data", "Data", "disk3s5", 700)]
+        ]]]
+        let dualPlist = try PropertyListSerialization.data(fromPropertyList: dualBoot, format: .xml, options: 0)
+        let current = try VolumeUsage.parse(apfsList: dualPlist, dataDevice: "disk3s5").get()
+        precondition(current.dataBytes == 700 && current.otherBytes == 100)
+        let oldBoot = try VolumeUsage.parse(apfsList: dualPlist, dataDevice: "disk3s1").get()
+        precondition(oldBoot.dataBytes == 100 && oldBoot.otherBytes == 700)
+
         let good = StorageReconciliation(dataUsed: 389_000_000_000, found: 380_000_000_000, uncertain: 6_000_000_000,
                                          unreadable: 2, notScanned: 0)
         precondition(abs(good.coverage - 380.0 / 389.0) < 1e-9 && good.meetsTarget)
