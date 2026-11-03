@@ -218,36 +218,287 @@ struct DuplicatesView: View {
 
 struct StorageMapView: View {
     @EnvironmentObject private var model: AppModel
-    private let colors: [Color] = [.cyan, .blue, .purple, .pink, .orange, .green, .indigo]
+    @State private var path: [String] = []
 
     var body: some View {
         VStack(spacing: 0) {
             moduleHeader(
                 title: "Storage Map",
-                subtitle: "Understand which areas of your home folder use the most space.",
-                buttonTitle: "Analyze Again",
+                subtitle: "Everything on your startup disk, measured the way APFS stores it.",
+                buttonTitle: model.storageState == .loading ? "Analyzing…" : "Analyze Again",
                 isBusy: model.storageState == .loading,
-                action: { model.analyzeStorage(force: true) }
+                action: { path = []; model.analyzeStorage(force: true) }
             )
-
-            if case .failed(let message) = model.storageState {
-            ScanFailureView(message: message)
-        } else if model.storageState == .loading && model.storageEntries.isEmpty {
-                LoadingView(title: "Measuring folders…")
-            } else if model.storageEntries.isEmpty {
-                ContentUnavailableView("No storage data", systemImage: "chart.pie", description: Text("Start an analysis to map your storage."))
-            } else {
+            if model.storageState == .loading, model.diskMap != nil, let started = model.storageStarted {
+                ScanElapsedView(started: started).padding(.bottom, 8)
+            }
+            if case .failed(let message) = model.storageState, model.diskMap == nil {
+                ScanFailureView(message: message)
+            } else if let report = model.diskMap {
                 ScrollView {
-                    VStack(spacing: 12) {
-                        ForEach(Array(model.storageEntries.enumerated()), id: \.element.id) { index, entry in
-                            StorageBar(entry: entry, maximum: model.storageEntries.first?.size ?? 1, color: colors[index % colors.count])
+                    VStack(alignment: .leading, spacing: 18) {
+                        if case .failed(let message) = model.storageState {
+                            Label(message, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange)
                         }
+                        DiskSummaryCard(report: report)
+                        DiskBrowser(root: report.tree.root, path: $path)
                     }
-                    .padding(30)
+                    .padding(.horizontal, 30).padding(.bottom, 30)
                 }
+            } else if model.storageState == .loading {
+                VStack(spacing: 16) {
+                    ProgressView().controlSize(.large)
+                    Text("Reading every folder on the startup disk…").font(.headline)
+                    if let started = model.storageStarted { ScanElapsedView(started: started) }
+                    Text("Folders protected by macOS are read separately; you may be asked to allow access.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView("No storage data", systemImage: "chart.pie", description: Text("Start an analysis to map your storage."))
             }
         }
         .task { model.analyzeStorage() }
+    }
+}
+
+private struct ScanElapsedView: View {
+    let started: Date
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            Text("Scanning · \(Int(context.date.timeIntervalSince(started)))s").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The whole container at a glance and how much of the used space the scan explains.
+private struct DiskSummaryCard: View {
+    @EnvironmentObject private var model: AppModel
+    let report: DiskMapReport
+
+    private struct Segment: Identifiable {
+        let id: String
+        let bytes: Int64
+        let color: Color
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let volumes = report.volumes {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("\(volumes.used.formattedBytes) used of \(volumes.capacity.formattedBytes)")
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
+                    Spacer()
+                    Text("\(volumes.free.formattedBytes) free").foregroundStyle(.secondary)
+                }
+                let segments = segments(volumes)
+                GeometryReader { proxy in
+                    HStack(spacing: 2) {
+                        ForEach(segments) { segment in
+                            Rectangle().fill(segment.color)
+                                .frame(width: max(2, proxy.size.width * CGFloat(Double(segment.bytes) / Double(max(1, volumes.capacity)))))
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .clipShape(Capsule())
+                    .background(Capsule().fill(.green.opacity(0.18)))
+                }
+                .frame(height: 18)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), alignment: .leading)], alignment: .leading, spacing: 8) {
+                    ForEach(segments) { segment in
+                        HStack(spacing: 8) {
+                            Circle().fill(segment.color).frame(width: 9, height: 9)
+                            Text(segment.id).font(.caption)
+                            Text(segment.bytes.formattedBytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        Circle().fill(.green.opacity(0.35)).frame(width: 9, height: 9)
+                        Text("Free").font(.caption)
+                        Text(volumes.free.formattedBytes).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                }
+                if let purgeable = volumes.purgeable, purgeable > 0 {
+                    Text("\(purgeable.formattedBytes) of the used space is purgeable: macOS frees it automatically when space is needed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("The disk layout was not available, so the scan cannot be compared with macOS.").font(.callout).foregroundStyle(.secondary)
+            }
+
+            Divider()
+            if let check = report.reconciliation {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("\(Int((check.coverage * 100).rounded(.down)))%")
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .foregroundStyle(check.meetsTarget ? .green : .orange)
+                    Text("of the data volume explained · found \(check.found.formattedBytes) of \(check.dataUsed.formattedBytes)")
+                        .font(.headline)
+                }
+                if check.unexplained > 0 {
+                    Text(unexplainedText(check)).font(.callout).foregroundStyle(.secondary)
+                }
+                if check.uncertain > 0 {
+                    Text("Up to \(check.uncertain.formattedBytes) may be counted in two places: copies that shared data on disk until one of them was changed (APFS clones).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if check.overcount > 0 {
+                    Text("The folders add up to \(check.overcount.formattedBytes) more than macOS reports, because of the shared copies above.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                if report.tree.root.unreadable > 0 {
+                    Button("Open Full Disk Access Settings…") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+                if report.tree.root.notScanned > 0 {
+                    Button("Review Scan Permissions…") { model.access.presented = true }
+                }
+                Spacer()
+                Text(report.date, style: .time).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func segments(_ volumes: VolumeUsage) -> [Segment] {
+        let found = min(report.reconciliation?.found ?? 0, volumes.dataBytes ?? 0)
+        let unexplained = max(0, (volumes.dataBytes ?? 0) - found)
+        return [Segment(id: "Your files and apps", bytes: found, color: .blue),
+                Segment(id: "Not explained", bytes: unexplained, color: .orange),
+                Segment(id: "macOS", bytes: volumes.macOSBytes, color: .gray),
+                Segment(id: "Virtual memory", bytes: volumes.virtualMemoryBytes, color: .purple),
+                Segment(id: "Other volumes", bytes: max(0, volumes.otherBytes), color: .pink)]
+            .filter { $0.bytes > 0 }
+    }
+
+    private func unexplainedText(_ check: StorageReconciliation) -> String {
+        var reasons: [String] = []
+        if check.unreadable > 0 { reasons.append("\(check.unreadable) folder\(check.unreadable == 1 ? "" : "s") macOS did not let Mac Polish read") }
+        if check.notScanned > 0 { reasons.append("\(check.notScanned) folder\(check.notScanned == 1 ? "" : "s") not read in time") }
+        if let snapshots = report.volumes?.snapshotCount, snapshots > 0 { reasons.append("\(snapshots) local snapshot\(snapshots == 1 ? "" : "s")") }
+        reasons.append("file system overhead")
+        return "\(check.unexplained.formattedBytes) is not explained by the folders below: " + reasons.joined(separator: ", ") + "."
+    }
+}
+
+/// Folder-by-folder view of the map, largest first.
+private struct DiskBrowser: View {
+    let root: DiskNode
+    @Binding var path: [String]
+
+    private var current: DiskNode {
+        path.reduce(root) { node, name in node.children.first { $0.name == name && $0.kind == .folder } ?? node }
+    }
+
+    var body: some View {
+        let folder = current
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    Button(root.name) { path = [] }.buttonStyle(.link)
+                    ForEach(Array(path.enumerated()), id: \.offset) { index, name in
+                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
+                        Button(name) { path = Array(path.prefix(index + 1)) }.buttonStyle(.link)
+                    }
+                }
+            }
+            HStack {
+                Text("\(folder.bytes.formattedBytes) · \(folder.files.formatted()) files").font(.headline)
+                Spacer()
+                if !path.isEmpty {
+                    Button("Back") { path.removeLast() }
+                }
+                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([DiskMapService.revealURL(path)]) }
+            }
+            if folder.children.isEmpty {
+                Text(folder.kind == .folder ? "No items large enough to list." : (folder.note ?? "Nothing to list."))
+                    .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
+            }
+            ForEach(folder.children, id: \.name) { child in
+                DiskRow(node: child, parentBytes: folder.bytes,
+                        open: { path.append(child.name) },
+                        reveal: { NSWorkspace.shared.activateFileViewerSelecting([DiskMapService.revealURL(path + [child.name])]) })
+            }
+        }
+        .padding(20)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private struct DiskRow: View {
+    let node: DiskNode
+    let parentBytes: Int64
+    let open: () -> Void
+    let reveal: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).foregroundStyle(tint).frame(width: 20)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(title).lineLimit(1).truncationMode(.middle)
+                    if node.kind == .folder { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary) }
+                }
+                if let detail { Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                GeometryReader { proxy in
+                    Capsule().fill(tint.opacity(0.75))
+                        .frame(width: max(2, proxy.size.width * CGFloat(Double(node.bytes) / Double(max(1, parentBytes)))))
+                }
+                .frame(height: 5)
+            }
+            Spacer(minLength: 12)
+            Text(node.bytes.formattedBytes).monospacedDigit().frame(minWidth: 80, alignment: .trailing)
+            if node.kind == .file || node.kind == .folder {
+                Button { reveal() } label: { Image(systemName: "magnifyingglass") }
+                    .buttonStyle(.borderless).help("Show in Finder")
+            }
+        }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .onTapGesture { if node.kind == .folder { open() } }
+        .contextMenu {
+            if node.kind == .file || node.kind == .folder { Button("Show in Finder", action: reveal) }
+        }
+    }
+
+    private var title: String {
+        node.kind == .smallerItems ? "\(node.files.formatted()) smaller items" : node.name
+    }
+
+    private var detail: String? {
+        switch node.kind {
+        case .unreadable: "Needs Full Disk Access to measure"
+        case .notScanned: node.note ?? "Not read in time"
+        case .folder:
+            node.unreadable > 0 ? "\(node.files.formatted()) files · \(node.unreadable) folder\(node.unreadable == 1 ? "" : "s") could not be read"
+                : "\(node.files.formatted()) files"
+        case .file, .smallerItems: nil
+        }
+    }
+
+    private var icon: String {
+        switch node.kind {
+        case .folder: "folder.fill"
+        case .file: "doc.fill"
+        case .smallerItems: "ellipsis.circle"
+        case .unreadable: "lock.fill"
+        case .notScanned: "clock.badge.exclamationmark"
+        }
+    }
+
+    private var tint: Color {
+        switch node.kind {
+        case .folder: .blue
+        case .file: .cyan
+        case .smallerItems: .gray
+        case .unreadable, .notScanned: .orange
+        }
     }
 }
 
@@ -298,51 +549,6 @@ struct StartupItemsView: View {
             }
         }
         .task { model.loadStartupItems() }
-    }
-}
-
-private struct StorageBar: View {
-    let entry: StorageEntry
-    let maximum: Int64
-    let color: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label(entry.name, systemImage: icon)
-                    .font(.headline)
-                Spacer()
-                Text(entry.size.formattedBytes)
-                    .font(.system(.body, design: .monospaced).weight(.semibold))
-            }
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(color.opacity(0.12))
-                    Capsule()
-                        .fill(LinearGradient(colors: [color, color.opacity(0.65)], startPoint: .leading, endPoint: .trailing))
-                        .frame(width: max(8, proxy.size.width * CGFloat(Double(entry.size) / Double(max(1, maximum)))))
-                }
-            }
-            .frame(height: 16)
-        }
-        .padding(18)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .contextMenu {
-            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) }
-        }
-    }
-
-    private var icon: String {
-        switch entry.name {
-        case "Downloads": "arrow.down.circle"
-        case "Documents": "doc"
-        case "Desktop": "menubar.dock.rectangle"
-        case "Pictures": "photo"
-        case "Movies": "film"
-        case "Music": "music.note"
-        case "Library": "books.vertical"
-        default: "folder"
-        }
     }
 }
 

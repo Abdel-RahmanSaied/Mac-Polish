@@ -9,6 +9,11 @@ final class AppModel: ObservableObject {
             self?.cleanupOutcome = outcome
             self?.operationIssues = outcome.issues
         }
+        // Optimize maps the whole disk too; share the result with the Storage Map.
+        optimizer.onDiskMap = { [weak self] report in
+            self?.diskMap = report
+            self?.storageState = .ready
+        }
         return optimizer
     }()
     let memory = MemoryMonitor()
@@ -17,13 +22,16 @@ final class AppModel: ObservableObject {
     @Published var state: ScanState = .idle
     @Published var items: [ScanItem] = []
     @Published var lastCleanup: CleanupResult?
+    /// Set when some scan sections could not be read; the other results are still shown.
+    @Published var scanWarning: String?
     @Published var includeLargeFiles = true
     @Published var applications: [ApplicationItem] = []
     @Published var applicationState: ModuleState = .idle
     @Published var duplicateFiles: [DuplicateFile] = []
     @Published var duplicateState: ModuleState = .idle
-    @Published var storageEntries: [StorageEntry] = []
+    @Published var diskMap: DiskMapReport?
     @Published var storageState: ModuleState = .idle
+    @Published var storageStarted: Date?
     @Published var startupEntries: [StartupEntry] = []
     @Published var startupState: ModuleState = .idle
     @Published var operationMessage: String?
@@ -45,9 +53,9 @@ final class AppModel: ObservableObject {
         dockerCleaning = true
         dockerCleanupMessage = nil
         Task {
-            let message = await Task.detached(priority: .utility) {
+            let message = await BackgroundWork.run(qos: .utility) {
                 SystemDataScanner.cleanDockerBuildCache()
-            }.value
+            }
             dockerCleanupMessage = message
             dockerCleaning = false
             analyzeSystemData()
@@ -58,9 +66,9 @@ final class AppModel: ObservableObject {
         guard !systemDataLoading, !dockerCleaning else { return }
         systemDataLoading = true
         Task {
-            let report = await Task.detached(priority: .utility) {
+            let report = await BackgroundWork.run(qos: .utility) {
                 SystemDataScanner().scan()
-            }.value
+            }
             systemDataReport = report
             systemDataLoading = false
         }
@@ -70,7 +78,6 @@ final class AppModel: ObservableObject {
     private let cleaner = SafeCleaner()
     private let applicationScanner = ApplicationScanner()
     private let duplicateScanner = DuplicateScanner()
-    private let storageScanner = StorageScanner()
     private let startupScanner = StartupScanner()
     private let applicationUninstaller = ApplicationUninstaller()
 
@@ -128,20 +135,47 @@ final class AppModel: ObservableObject {
         guard state != .scanning && state != .cleaning else { return }
         state = .scanning
         lastCleanup = nil
+        scanWarning = nil
 
         Task {
             let includeLargeFiles = includeLargeFiles
-            let result = await Task.detached(priority: .userInitiated) {
+            let result = await BackgroundWork.run(qos: .userInitiated) {
                 DiskScanService.scan(includeLargeFiles: includeLargeFiles)
-            }.value
+            }
             switch result {
-            case .success(let results):
-                items = results
+            case .success(let outcome):
+                items = outcome.items
+                scanWarning = outcome.warning
                 state = .finished
             case .failure(let failure):
                 state = .failed(failure.message)
             }
         }
+    }
+
+    struct PendingCleanup: Equatable {
+        let itemIDs: Set<UUID>
+        let count: Int
+        let bytes: Int64
+    }
+    @Published var pendingCleanup: PendingCleanup?
+
+    /// Prepare a confirmation for the selected items among `itemIDs` (the items visible on the page).
+    func requestCleanup(itemIDs: Set<UUID>) {
+        let selected = items.filter { $0.isSelected && itemIDs.contains($0.id) }
+        guard !selected.isEmpty, state != .cleaning, state != .scanning else { return }
+        pendingCleanup = PendingCleanup(itemIDs: Set(selected.map(\.id)), count: selected.count,
+                                        bytes: selected.reduce(0) { $0 + $1.size })
+    }
+
+    func cancelCleanup() {
+        pendingCleanup = nil
+    }
+
+    func confirmCleanup() {
+        guard let pending = pendingCleanup else { return }
+        pendingCleanup = nil
+        cleanSelected(itemIDs: pending.itemIDs)
     }
 
     func cleanSelected(itemIDs: Set<UUID>? = nil) {
@@ -152,9 +186,9 @@ final class AppModel: ObservableObject {
         state = .cleaning
 
         Task {
-            let result = await Task.detached(priority: .userInitiated) { [cleaner] in
+            let result = await BackgroundWork.run(qos: .userInitiated) { [cleaner] in
                 cleaner.clean(selectedItems)
-            }.value
+            }
             items.removeAll { result.removedItemIDs.contains($0.id) }
             lastCleanup = result
             state = .finished
@@ -174,9 +208,9 @@ final class AppModel: ObservableObject {
         applicationState = .loading
 
         Task {
-            let result = await Task.detached(priority: .userInitiated) {
+            let result = await BackgroundWork.run(qos: .userInitiated) {
                 DiskScanService.read(ApplicationItem.self, mode: "applications")
-            }.value
+            }
             switch result {
             case .success(let results):
                 applications = results
@@ -193,9 +227,9 @@ final class AppModel: ObservableObject {
         duplicateState = .loading
 
         Task {
-            let result = await Task.detached(priority: .userInitiated) {
+            let result = await BackgroundWork.run(qos: .userInitiated) {
                 DiskScanService.read(DuplicateFile.self, mode: "duplicates")
-            }.value
+            }
             switch result {
             case .success(let results):
                 duplicateFiles = results
@@ -207,17 +241,17 @@ final class AppModel: ObservableObject {
     }
 
     func analyzeStorage(force: Bool = false) {
-        guard force || storageEntries.isEmpty else { return }
+        guard force || diskMap == nil else { return }
         guard storageState != .loading else { return }
         storageState = .loading
+        storageStarted = Date()
 
         Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                DiskScanService.read(StorageEntry.self, mode: "storage")
-            }.value
+            let result = await BackgroundWork.run(qos: .userInitiated) { DiskMapService.scan() }
+            storageStarted = nil
             switch result {
-            case .success(let results):
-                storageEntries = results
+            case .success(let report):
+                diskMap = report
                 storageState = .ready
             case .failure(let failure):
                 storageState = .failed(failure.message)
@@ -231,9 +265,9 @@ final class AppModel: ObservableObject {
         startupState = .loading
 
         Task {
-            let result = await Task.detached(priority: .userInitiated) {
+            let result = await BackgroundWork.run(qos: .userInitiated) {
                 DiskScanService.read(StartupEntry.self, mode: "startup")
-            }.value
+            }
             switch result {
             case .success(let results):
                 startupEntries = results
@@ -260,9 +294,9 @@ final class AppModel: ObservableObject {
         applicationState = .loading
 
         Task {
-            let result = await Task.detached(priority: .userInitiated) { [applicationUninstaller] in
+            let result = await BackgroundWork.run(qos: .userInitiated) { [applicationUninstaller] in
                 applicationUninstaller.remove(selected)
-            }.value
+            }
             applications.removeAll { result.removedIDs.contains($0.id) }
             applicationState = .ready
             showCleanupOutcome(removedCount: result.removedIDs.count, bytes: result.reclaimedBytes, issues: result.issues)
@@ -282,9 +316,9 @@ final class AppModel: ObservableObject {
         duplicateState = .loading
         let snapshot = duplicateFiles
         Task {
-            let result = await Task.detached(priority: .userInitiated) {
+            let result = await BackgroundWork.run(qos: .userInitiated) {
                 DuplicateCleaner().clean(snapshot)
-            }.value
+            }
             finishDuplicateCleanup(result)
         }
     }

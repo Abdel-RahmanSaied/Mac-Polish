@@ -58,16 +58,17 @@ enum MemoryReader {
                             pressure: pressureOK ? Int(pressure) : nil)
     }
 
-    static func residentSizes() -> [Int32: UInt64] {
-        let result = SystemDataScanner.run("/bin/ps", ["-axo", "pid=,rss="], timeout: 3)
-        guard result.status == 0 else { return [:] }
+    /// Resident memory (RSS) of one process, read directly instead of launching `ps` every few seconds.
+    static func residentSize(pid: Int32) -> UInt64? {
+        var info = proc_taskinfo()
+        let size = Int32(MemoryLayout<proc_taskinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, size) == size else { return nil }
+        return info.pti_resident_size
+    }
+
+    static func residentSizes(for pids: [Int32]) -> [Int32: UInt64] {
         var sizes: [Int32: UInt64] = [:]
-        for line in result.output.split(separator: "\n") {
-            let fields = line.split(whereSeparator: { $0.isWhitespace })
-            if fields.count == 2, let pid = Int32(fields[0]), let kb = UInt64(fields[1]), kb <= UInt64.max / 1024 {
-                sizes[pid] = kb * 1024
-            }
-        }
+        for pid in pids { sizes[pid] = residentSize(pid: pid) }
         return sizes
     }
 }
@@ -87,9 +88,12 @@ final class MemoryMonitor: ObservableObject {
         guard task == nil else { return }
         task = Task { [weak self] in
             while !Task.isCancelled {
-                let data = await Task.detached(priority: .utility) {
-                    (MemoryReader.sample(), MemoryReader.residentSizes())
-                }.value
+                let running = NSWorkspace.shared.runningApplications
+                    .filter { $0.activationPolicy == .regular && !$0.isTerminated }
+                    .map(\.processIdentifier)
+                let data = await BackgroundWork.run(qos: .utility) {
+                    (MemoryReader.sample(), MemoryReader.residentSizes(for: running))
+                }
                 guard let self else { return }
                 if let sample = data.0 {
                     self.sample = sample
@@ -238,8 +242,11 @@ struct MemoryMenu: View {
             }
             Button("Open Memory Dashboard") {
                 model.destination = .memory
-                openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
+                // openWindow(id:) on a WindowGroup adds a window every time; reuse the main window.
+                if !MainWindow.showExisting() {
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }.buttonStyle(.borderedProminent)
             Button("Quit Mac Polish") { NSApp.terminate(nil) }.buttonStyle(.borderless)
             Divider()

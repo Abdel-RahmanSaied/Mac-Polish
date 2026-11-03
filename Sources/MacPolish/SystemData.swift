@@ -27,8 +27,15 @@ struct SystemDataReport: Sendable {
     var measuredBytes: Int64 { areas.reduce(0) { $0 + ($1.bytes ?? 0) } }
 }
 
-/// Uses allocated disk blocks (du), not the logical capacity of sparse VM disks.
+/// Uses allocated disk blocks, not the logical capacity of sparse VM disks. APFS clones and hard links
+/// count once (see FileAttributes), unlike `du`, which counts every clone in full.
 struct SystemDataScanner: Sendable {
+    struct Spec: Sendable {
+        let name: String
+        let url: URL
+        let note: String
+    }
+
     static var dockerExecutable: String? {
         ["/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/Applications/Docker.app/Contents/Resources/bin/docker"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
@@ -70,8 +77,9 @@ struct SystemDataScanner: Sendable {
             ("Swap", URL(fileURLWithPath: "/private/var/vm"), "Virtual memory managed by macOS. Do not delete while the system is running."),
             ("Shared Library", URL(fileURLWithPath: "/Library"), "Shared support files, developer tools, audio assets and logs.")
         ]
-        let areas = specs.map { Self.measure(name: $0.0, url: $0.1, note: $0.2) }
-            .sorted { ($0.bytes ?? -1) > ($1.bytes ?? -1) }
+        let areas = Self.measureAll(specs.map { Spec(name: $0.0, url: $0.1, note: $0.2) }) {
+            Self.measure(name: $0.name, url: $0.url, note: $0.note)
+        }.sorted { ($0.bytes ?? -1) > ($1.bytes ?? -1) }
         let docker: String
         if let executable = Self.dockerExecutable {
             let result = Self.run(executable, ["--context", "desktop-linux", "system", "df"], timeout: 25)
@@ -82,26 +90,46 @@ struct SystemDataScanner: Sendable {
         return SystemDataReport(areas: areas, dockerOutput: docker, date: Date())
     }
 
-    static func measure(name: String, url: URL, note: String) -> SystemDataArea {
-        let result = run("/usr/bin/du", ["-x", "-k", "-d", "1", url.path], timeout: 45, captureErrors: true)
-        let rows = parseDU(result.output)
-        let total = rows.first { $0.url.path == url.path }?.bytes
-        let diagnostic = measurementStatus(status: result.status, output: result.output, hasTotal: total != nil)
-        return SystemDataArea(name: name, url: url, note: note, bytes: total,
-                              partial: result.status != 0 || total == nil,
-                              children: Array(rows.filter { $0.url.path != url.path && $0.bytes > 0 }
-                                .sorted { $0.bytes > $1.bytes }.prefix(6)), diagnostic: diagnostic)
+    /// Runs up to `width` measurements at once (each is a `du` process with its own deadline), keeping input order.
+    static func measureAll<Input: Sendable, Output: Sendable>(_ inputs: [Input], width: Int = 4,
+                                                              measure: @escaping @Sendable (Input) -> Output) -> [Output] {
+        let gate = DispatchSemaphore(value: width)
+        return DiskScanService.concurrentMap(inputs) { input in
+            gate.wait()
+            defer { gate.signal() }
+            return measure(input)
+        }
     }
 
-    static func measurementStatus(status: Int32, output: String, hasTotal: Bool) -> String {
-        if status == -1 { return "Scan timed out or could not start; measurement is incomplete." }
-        if status == 0 && hasTotal { return "Measured" }
-        let lower = output.lowercased()
-        if lower.contains("permission denied") || lower.contains("operation not permitted") {
-            return "Access restricted. Review Full Disk Access for Mac Polish in System Settings, then scan again."
+    /// Measures one location in the read-only worker, listing its six largest entries.
+    static func measure(name: String, url: URL, note: String,
+                        reader: DiskMapService.TreeReader = DiskMapService.workerReader,
+                        timeout: TimeInterval = 60) -> SystemDataArea {
+        let options = DiskTreeOptions(minimumListedBytes: 1, maximumChildren: 6, keepDepth: 1, threads: 4)
+        switch reader(url.path, options, timeout) {
+        case .success(let tree):
+            let root = tree.root
+            let unavailable = tree.missing || root.kind == .unreadable
+            return SystemDataArea(name: name, url: url, note: note, bytes: unavailable ? nil : root.bytes,
+                                  partial: unavailable || tree.incomplete || root.unreadable > 0 || root.notScanned > 0,
+                                  children: root.children.filter { $0.kind != .smallerItems && $0.bytes > 0 }.prefix(6)
+                                    .map { SystemDataChild(url: url.appending(path: $0.name), bytes: $0.bytes) },
+                                  diagnostic: status(for: tree))
+        case .failure(let failure):
+            return SystemDataArea(name: name, url: url, note: note, bytes: nil, partial: true, children: [],
+                                  diagnostic: failure.timedOut ? "Scan timed out or could not start; measurement is incomplete."
+                                    : "Measurement incomplete or unavailable; this does not mean the folder is empty.")
         }
-        if lower.contains("no such file or directory") { return "Location missing or changed during scan." }
-        return "Measurement incomplete or unavailable; this does not mean the folder is empty."
+    }
+
+    static func status(for tree: DiskTreeResult) -> String {
+        if tree.missing { return "Location missing or changed during scan." }
+        let unreadable = tree.root.unreadable
+        if unreadable > 0 {
+            return "Access restricted for \(unreadable) folder\(unreadable == 1 ? "" : "s"). Review Full Disk Access for Mac Polish in System Settings, then scan again."
+        }
+        if tree.incomplete { return "Time limit reached; measurement is incomplete." }
+        return "Measured. Copies that share data on disk (APFS clones) are counted once."
     }
 
     /// Parse only the build-cache size column; volumes and image totals are never cleanup permission.
@@ -110,22 +138,13 @@ struct SystemDataScanner: Sendable {
         let columns = line.split(whereSeparator: { $0.isWhitespace })
         guard columns.count >= 6 else { return nil }
         let token = String(columns[4])
-        let units: [(String, Double)] = [("GB", 1e9), ("MB", 1e6), ("kB", 1e3), ("B", 1)]
+        let units: [(String, Double)] = [("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3), ("B", 1)]
         for (unit, factor) in units where token.hasSuffix(unit) {
             guard let value = Double(token.dropLast(unit.count)), value.isFinite, value >= 0,
                   value * factor < Double(Int64.max) else { return nil }
             return Int64(value * factor)
         }
         return nil
-    }
-
-    static func parseDU(_ output: String) -> [SystemDataChild] {
-        output.split(separator: "\n").compactMap { line in
-            let parts = line.split(separator: "\t", maxSplits: 1)
-            guard parts.count == 2, let blocks = Int64(parts[0]), blocks >= 0,
-                  blocks <= Int64.max / 1024 else { return nil }
-            return SystemDataChild(url: URL(fileURLWithPath: String(parts[1])), bytes: blocks * 1024)
-        }
     }
 
     static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval, captureErrors: Bool = false) -> (output: String, status: Int32) {
@@ -183,7 +202,7 @@ struct SystemDataView: View {
             if model.systemDataLoading {
                 HStack(spacing: 12) {
                     ProgressView().controlSize(.small)
-                    Text("Measuring allocated disk space and querying Docker…").font(.caption)
+                    Text("Measuring disk space and querying Docker…").font(.caption)
                 }.padding(12)
             }
             if let report = model.systemDataReport {

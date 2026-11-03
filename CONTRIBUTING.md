@@ -32,8 +32,17 @@ open "dist/Mac Polish.app"
 | `Sources/MacPolish/AppModel.swift` | حالة التطبيق وتنسيق العمليات |
 | `Sources/MacPolish/ContentView.swift` | الصفحة الرئيسية والتنقل ونتائج التنظيف |
 | `Sources/MacPolish/AdvancedViews.swift` | واجهات التطبيقات والمكررات والتخزين وStartup Items |
-| `Sources/MacPolish/Scanner.swift` | فحص الملفات والتنظيف عبر Trash |
-| `Sources/MacPolish/AdvancedScanners.swift` | فحص التطبيقات والمكررات والتخزين وعناصر التشغيل |
+| `Sources/MacPolish/Scanner.swift` | فحص الملفات (مقسّم إلى أقسام مستقلة) والتنظيف عبر Trash |
+| `Sources/MacPolish/AdvancedScanners.swift` | فحص التطبيقات والمكررات وعناصر التشغيل، وقياس الأحجام وأحدث تاريخ للمحتوى |
+| `Sources/MacPolish/FileAttributes.swift` | قراءة السمات بـ`getattrlistbulk`، وحصة كل مسار من البيانات المشتركة (Clones والروابط الصلبة) |
+| `Sources/MacPolish/DiskTree.swift` | قراءة شجرة المجلدات بعدة خيوط مع جمع العناصر الصغيرة والمهلة الزمنية |
+| `Sources/MacPolish/DiskMapService.swift` | خريطة قرص التشغيل: وحدة البيانات في عملية، وكل مجلد محمي في عملية مستقلة، ثم الدمج |
+| `Sources/MacPolish/VolumeUsage.swift` | تقسيم حاوية APFS بين الوحدات، ومقارنة ما وُجد بالمساحة المستخدمة |
+| `Sources/MacPolish/CleanupPolicy.swift` | قاعدة واحدة لما يُختار تلقائيًا في Cleanup ويُقترح في Optimize |
+| `Sources/MacPolish/ScanWorker.swift` | عملية الفحص المساعدة للقراءة فقط، وترفض أي مُشغّل غير التطبيق نفسه |
+| `Sources/MacPolish/DiskScanService.swift` | تشغيل أقسام الفحص بالتوازي بمهلة لكل قسم ودمج النتائج الجزئية |
+| `Sources/MacPolish/BackgroundWork.swift` | تشغيل العمل المعطِّل (عمليات خارجية وقراءة القرص) على GCD |
+| `Sources/MacPolish/MainWindow.swift` | تتبع النافذة الرئيسية الوحيدة وإعادة إظهارها |
 | `Sources/MacPolish/SystemData.swift` | تحليل بيانات النظام وتكامل Docker |
 | `Sources/MacPolish/Optimize.swift` | خطة Optimize وقواعد الاقتراح والتنفيذ |
 | `Sources/MacPolish/DuplicateSelection.swift` | اختيار النسخ الزائدة مع الاحتفاظ بنسخة |
@@ -55,6 +64,7 @@ open "dist/Mac Polish.app"
 
 - استخدم Swift وSwiftUI بما يتوافق مع إصدار macOS الأدنى المحدد في `Package.swift`.
 - نفّذ العمل الثقيل خارج المسار الرئيسي للواجهة، وحدّث الحالة المرئية على MainActor.
+- استخدم `BackgroundWork.run` للعمل الذي ينتظر عمليات خارجية أو القرص، وليس `Task.detached`: مجموعة خيوط Swift concurrency محدودة بعدد الأنوية، والانتظار المعطِّل فيها يؤخر بقية المهام.
 - امنع بدء نفس العملية مرتين بالتزامن، واعرض حالة التحميل والنتيجة والأخطاء بوضوح.
 - ميّز بين نتيجة فارغة وفشل الوصول؛ لا تعتبر المجلد غير المقروء فارغًا.
 - لا تدّعِ أن قياس مجلدات محددة يساوي كامل تصنيف System Data في macOS.
@@ -90,14 +100,20 @@ swift build
 
 المشروع حاليًا لا يعرّف test target في `Package.swift`. الاختبارات الموجودة برامج تحقق مستقلة، ولا يكفي تشغيل `swift test` لتشغيلها.
 
-لتشغيل مجموعة التحقق كاملة بأمر واحد:
+لتشغيل مجموعة التحقق كاملة، أو اختبار واحد بالاسم:
 
 ```sh
 Scripts/test.sh
+Scripts/test.sh CleanupPolicyCheck
 Scripts/test.sh --e2e
 ```
 
-الخيار `--e2e` ينشئ ملفات اختبار جديدة داخل مجلد فريد باسم `MacPolish-E2E-*` في Library/Caches، ويجرب الفحص واختيار النسخ والنقل الفعلي إلى Trash ثم الاستعادة. لا يستهدف أي محتويات موجودة مسبقًا في Trash أو ملفات شخصية. توجد أيضًا واجهة اختبار منفصلة:
+السكريبت يبني كل ملف في `Tests/` مع كل ملفات `Sources/MacPolish` عدا ملفات الواجهة ونقطة البداية (`MacPolishApp` و`main` و`ContentView` و`AdvancedViews`)، لذلك لا تحتاج تحديث قوائم الملفات عند إضافة ملف جديد. أضف اسم أي اختبار جديد إلى قائمة `CHECKS` في السكريبت. شغّل الأوامر من جذر المشروع.
+
+الخيار `--e2e` ينشئ ملفات اختبار جديدة داخل مجلد فريد باسم `MacPolish-E2E-*` في Library/Caches، ويجرب الفحص واختيار النسخ والنقل الفعلي إلى Trash ثم الاستعادة. لا يستهدف أي محتويات موجودة مسبقًا في Trash أو ملفات شخصية. بعده يعمل `DiskMapE2E`، وهو اختبار خريطة التخزين من أولها لآخرها:
+
+- **الجزء الأول:** ينشئ قرصًا تجريبيًا معزولًا في مجلد `MacPolish-DiskMapE2E-*`. الاختبار نفسه يعمل كعملية الفحص المساعدة، تمامًا مثل `main.swift` في التطبيق، فيمر كل فحص بالمسار الحقيقي: عملية مساعدة لكل مجلد محمي، والتحقق من أن المُشغّل هو البرنامج نفسه، وإرسال النتيجة بصيغة JSON، والمهلة الزمنية مع إيقاف العملية، ودمج المجلدات، والمقارنة مع المساحة المستخدمة.
+- **الجزء الثاني:** يقرأ قرص التشغيل الحقيقي للقراءة فقط، دون المجلدات التي قد تُظهر طلب إذن من macOS، ثم يطبع النسبة التي وجدها. توجد أيضًا واجهة اختبار منفصلة:
 
 ```sh
 Scripts/build-ui-e2e.sh
@@ -106,41 +122,28 @@ open .build/UIE2E.app
 
 واجهة الاختبار تستخدم bundle identifier منفصلًا وملفات معزولة، وتضيف قائمة E2E لمحاكاة رفض الصلاحية والملف المقفول. لا تدخل في حزمة التطبيق المنشورة. اختبارات الواجهة تراجع التأكيد والإلغاء ومعالجة الخطأ، بينما اختبار Trash الحقيقي منفصل.
 
-اختبار اختيار النسخ المكررة:
+ما يغطيه كل اختبار:
 
-```sh
-swiftc -parse-as-library \
-  Sources/MacPolish/Models.swift \
-  Sources/MacPolish/DuplicateSelection.swift \
-  Tests/DuplicateSelectionCheck.swift \
-  -o .build/duplicate-selection-check
-.build/duplicate-selection-check
-```
-
-اختبار سياسة Optimize وحالات قياس المساحة وصلاحيات الوصول وقراءة Docker (يشمل مجلدات مؤقتة فقط، ولا يشغّل تنظيف Docker):
-
-```sh
-swiftc -parse-as-library \
-  Sources/MacPolish/Models.swift \
-  Sources/MacPolish/Scanner.swift \
-  Sources/MacPolish/DiskScanService.swift \
-  Sources/MacPolish/TrashValidation.swift \
-  Sources/MacPolish/AdvancedScanners.swift \
-  Sources/MacPolish/DuplicateSelection.swift \
-  Sources/MacPolish/DuplicateCleaner.swift \
-  Sources/MacPolish/CleanupDetails.swift \
-  Sources/MacPolish/AccessSetup.swift \
-  Sources/MacPolish/AppModel.swift \
-  Sources/MacPolish/Memory.swift \
-  Sources/MacPolish/Updates.swift \
-  Sources/MacPolish/SystemData.swift \
-  Sources/MacPolish/Optimize.swift \
-  Tests/OptimizePolicyCheck.swift \
-  -o .build/optimize-policy-check
-.build/optimize-policy-check
-```
-
-شغّل هذه الأوامر من جذر المشروع بعد `swift build`، الذي ينشئ مجلد `.build`. قد تحتاج تحديث قائمة الملفات إذا تغير تقسيم الكود.
+| الاختبار | التغطية |
+|---|---|
+| `DuplicateSelectionCheck` | اختيار النسخ الزائدة والاحتفاظ بنسخة |
+| `UpdateCheck` | ترتيب الإصدارات وقناة المعاينة والمسودات ومنع الرجوع لإصدار أقدم |
+| `AccessSetupCheck` | تصنيف حالات الوصول وحفظ إتمام الإعداد في إعدادات معزولة |
+| `OptimizePolicyCheck` | سياسة Optimize وقراءة Docker وقياس المجلدات (مجلدات مؤقتة فقط، ولا يشغّل تنظيف Docker) |
+| `TrashValidationCheck` | أخطاء النقل المتداخلة والملفات المقفولة والمجلدات للقراءة فقط وفتح شاشة الصلاحيات بدون إعادة التنفيذ |
+| `DuplicateSafetyCheck` | إعادة التحقق من المحتوى والنسخة المحتفظ بها والروابط الرمزية والمكتبات المُدارة |
+| `StorageMeasurementCheck` | الأحجام المخصصة، وحساب Clones والروابط الصلبة مرة واحدة، والمجلدات غير المقروءة، والمهلة الزمنية للعمليات |
+| `ScannerRegressionCheck` | تجاهل الملفات الخاصة مثل FIFO، وLarge Files مع الملفات المخفية والحزم وتخطي المجلدات المخفية |
+| `CleanupPolicyCheck` | أحدث تاريخ للمحتوى داخل المجلد، والكاش الذي يحمل حالة، وعناصر Trash، وهوية حزمة Xcode |
+| `CleanupConfirmationCheck` | تأكيد Move Selected to Trash وملخصه والإلغاء |
+| `ScanWorkerGuardCheck` | رفض عملية الفحص المساعدة إذا شغّلها برنامج آخر |
+| `BackgroundWorkCheck` | عدم حجز خيوط Swift concurrency بالعمل المعطِّل |
+| `PartialScanCheck` | الاحتفاظ بنتائج الأقسام المقروءة وفحص كل مجلد وصول على حدة |
+| `HardeningCheck` | حصر مسارات بقايا التطبيقات، وتجميع المكررات بطول المحتوى، والقياس المتوازي، وقراءة الذاكرة بدون `ps`، وأحجام TB |
+| `DiskTreeCheck` | شجرة المجلدات: الإجماليات، والجمع، والمجلدات غير المقروءة، وتطابق النتائج مع خيط واحد، والمهلة، والتطابق مع `du`، والدمج |
+| `VolumeUsageCheck` | قراءة حاوية APFS ووحداتها، ونسبة التفسير والعد الزائد |
+| `DiskMapCheck` | دمج المجلدات المحمية في الخريطة، والمجلد الذي لم يُجب في الوقت، وفشل الوحدة الرئيسية، وطلب عملية الفحص |
+| `DiskMapE2E` (مع `--e2e`) | خريطة التخزين عبر عمليات فحص حقيقية على قرص تجريبي، ثم قراءة قرص التشغيل الحقيقي للقراءة فقط |
 
 لتغييرات الواجهة، اختبر التنقل والبحث وحالة التحميل وعدم وجود نتائج، وتأكد من أن الأزرار لا تؤثر على اختيارات صفحة أخرى. لتغييرات التنظيف، أضف حالات للملفات المفقودة، والصلاحيات المرفوضة، والروابط الرمزية، وتغير الملفات بعد الفحص.
 
@@ -171,9 +174,8 @@ swiftc -parse-as-library \
 ## Update checker tests
 
 ```sh
-swiftc -parse-as-library Sources/MacPolish/Updates.swift Tests/UpdateCheck.swift -o .build/update-check
-.build/update-check
-.build/update-check --live
+Scripts/test.sh UpdateCheck
+.build/checks/UpdateCheck --live
 ```
 
 The optional `--live` check contacts GitHub to validate published-release decoding. Offline checks cover numeric ordering, preview channels, missing assets, drafts, and downgrade prevention.
@@ -182,8 +184,7 @@ The optional `--live` check contacts GitHub to validate published-release decodi
 ## اختبار إعداد الصلاحيات
 
 ```sh
-swiftc -parse-as-library $(rg --files Sources/MacPolish -g '*.swift' | rg -v '/(MacPolishApp|main|ContentView|AdvancedViews)\.swift$') Tests/AccessSetupCheck.swift -o .build/access-setup-check
-.build/access-setup-check
+Scripts/test.sh AccessSetupCheck
 ```
 
 يستخدم الاختبار مجلدًا مؤقتًا وإعدادات معزولة. لا يطلب صلاحيات macOS ولا يغيّر TCC. يغطي تمييز الوصول المرفوض والمجلد المفقود وخطأ القراءة، وعدم ادعاء الصلاحية عند تخطي الإعداد. يدويًا، راجع ظهور الشاشة أول مرة، والتخطي، وإعادة فتحها من Settings، وعدم بدء الفحص أثناء الإعداد. لا تغيّر صلاحيات النظام نيابة عن المستخدم أثناء الاختبار.
@@ -192,8 +193,7 @@ swiftc -parse-as-library $(rg --files Sources/MacPolish -g '*.swift' | rg -v '/(
 ## اختبار أخطاء النقل وطلب الوصول
 
 ```sh
-swiftc -parse-as-library $(rg --files Sources/MacPolish -g '*.swift' | rg -v '/(MacPolishApp|main|ContentView|AdvancedViews)\.swift$') Tests/TrashValidationCheck.swift -o .build/trash-validation-check
-.build/trash-validation-check
+Scripts/test.sh TrashValidationCheck
 ```
 
 ينشئ الاختبار مجلدًا معزولًا باسم فريد داخل Library/Caches، ويحقن عملية نقل تجريبية لا تحذف أو تنقل الملفات فعليًا. يغطي أخطاء Cocoa وPOSIX والأخطاء المتداخلة، وكاش Go والمجلدات للقراءة فقط، والنجاح الجزئي والاحتفاظ بالاختيارات الفاشلة وفتح شاشة الصلاحيات بدون إعادة تنفيذ التنظيف.

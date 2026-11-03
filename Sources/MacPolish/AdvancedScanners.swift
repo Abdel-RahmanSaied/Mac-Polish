@@ -34,7 +34,8 @@ struct ApplicationScanner: Sendable {
                 let bundleID = bundle?.bundleIdentifier
                 let version = (bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
                     ?? (bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
-                let leftovers = findLeftovers(appName: name, bundleIdentifier: bundleID)
+                let leftovers = Self.leftovers(appName: name, bundleIdentifier: bundleID,
+                                               library: fileManager.homeDirectoryForCurrentUser.appending(path: "Library"))
 
                 results.append(ApplicationItem(
                     id: UUID(),
@@ -54,11 +55,15 @@ struct ApplicationScanner: Sendable {
         return results.sorted { $0.totalSize > $1.totalSize }
     }
 
-    private func findLeftovers(appName: String, bundleIdentifier: String?) -> [URL] {
-        let library = fileManager.homeDirectoryForCurrentUser.appending(path: "Library")
+    static func leftovers(appName: String, bundleIdentifier: String?, library: URL) -> [URL] {
+        let fileManager = FileManager.default
         var candidates: [URL] = []
+        // Names come from the app's own Info.plist; only a plain single folder name is trusted.
+        func isPlainName(_ name: String) -> Bool {
+            !name.isEmpty && name != "." && name != ".." && !name.contains("/")
+        }
 
-        if let bundleIdentifier, !bundleIdentifier.isEmpty {
+        if let bundleIdentifier, isPlainName(bundleIdentifier) {
             candidates += [
                 library.appending(path: "Caches/\(bundleIdentifier)"),
                 library.appending(path: "Preferences/\(bundleIdentifier).plist"),
@@ -68,10 +73,12 @@ struct ApplicationScanner: Sendable {
             ]
         }
 
-        candidates += [
-            library.appending(path: "Application Support/\(appName)"),
-            library.appending(path: "Caches/\(appName)")
-        ]
+        if isPlainName(appName) {
+            candidates += [
+                library.appending(path: "Application Support/\(appName)"),
+                library.appending(path: "Caches/\(appName)")
+            ]
+        }
 
         var seen: Set<String> = []
         return candidates.filter { url in
@@ -93,9 +100,7 @@ struct DuplicateScanner: Sendable {
         let roots = customRoots ?? ["Downloads", "Documents", "Desktop", "Pictures"].map {
             home.appending(path: $0, directoryHint: .isDirectory)
         }
-        let keys: Set<URLResourceKey> = [
-            .isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .totalFileAllocatedSizeKey
-        ]
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
         var bySize: [Int64: [URL]] = [:]
 
         for root in roots {
@@ -113,7 +118,10 @@ struct DuplicateScanner: Sendable {
                 guard let values = try? url.resourceValues(forKeys: keys),
                       values.isRegularFile == true,
                       values.isSymbolicLink != true else { continue }
-                let size = Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
+                // Identical content always has identical length; allocated blocks vary with
+                // sparse files and compression, and would split or blur the size groups.
+                guard let length = values.fileSize else { continue }
+                let size = Int64(length)
                 guard size >= minimumSize else { continue }
                 bySize[size, default: []].append(url)
             }
@@ -150,22 +158,6 @@ struct DuplicateScanner: Sendable {
         try? FileFingerprint.sha256(url)
     }
 
-}
-
-struct StorageScanner: Sendable {
-    private var fileManager: FileManager { .default }
-
-    func scan() -> [StorageEntry] {
-        let home = fileManager.homeDirectoryForCurrentUser
-        let names = ["Library", "Documents", "Downloads", "Desktop", "Pictures", "Movies", "Music"]
-
-        return names.compactMap { name in
-            let url = home.appending(path: name, directoryHint: .isDirectory)
-            guard fileManager.fileExists(atPath: url.path) else { return nil }
-            return StorageEntry(id: UUID(), name: name, url: url, size: FileSizeCalculator.allocatedSize(of: url))
-        }
-        .sorted { $0.size > $1.size }
-    }
 }
 
 struct StartupScanner: Sendable {
@@ -274,31 +266,53 @@ struct ApplicationUninstaller: Sendable {
     }
 }
 
+struct SizeMeasurement: Sendable {
+    /// Real disk space: clones and hard links count once across all their paths (see FileAttributes).
+    let bytes: Int64
+    /// Newest modification date of the item, its files and its sub-folders.
+    let newestModification: Date?
+    /// Folders inside that macOS would not let this process read; their contents are not in `bytes`.
+    var unreadableFolders = 0
+}
+
 enum FileSizeCalculator {
     static func allocatedSize(of url: URL) -> Int64 {
-        let fileManager = FileManager.default
-        let keys: Set<URLResourceKey> = [
-            .isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey,
-            .fileAllocatedSizeKey, .totalFileAllocatedSizeKey
-        ]
-        guard let values = try? url.resourceValues(forKeys: keys), values.isSymbolicLink != true else { return 0 }
-        if values.isRegularFile == true {
-            return Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+        measure(url).bytes
+    }
+
+    /// Walks the item on its own volume without following symbolic links or entering mount points.
+    static func measure(_ url: URL) -> SizeMeasurement {
+        guard let item = FileAttributes.read(path: url.path) else {
+            return SizeMeasurement(bytes: 0, newestModification: nil, unreadableFolders: 1)
         }
-        guard values.isDirectory == true,
-              let enumerator = fileManager.enumerator(
-                at: url,
-                includingPropertiesForKeys: Array(keys),
-                options: []
-              ) else { return 0 }
+        switch item.kind {
+        case .file: return SizeMeasurement(bytes: item.attributedBytes, newestModification: item.modified)
+        case .folder: break
+        case .symlink, .other: return SizeMeasurement(bytes: 0, newestModification: nil)
+        }
 
         var total: Int64 = 0
-        for case let child as URL in enumerator {
-            guard let childValues = try? child.resourceValues(forKeys: keys),
-                  childValues.isRegularFile == true,
-                  childValues.isSymbolicLink != true else { continue }
-            total += Int64(childValues.totalFileAllocatedSize ?? childValues.fileAllocatedSize ?? 0)
+        var newest = item.modified
+        var unreadable = 0
+        var pending = [url.path]
+        while let folder = pending.popLast() {
+            let listing = BulkDirectoryReader.entries(of: folder)
+            if listing.error != nil { unreadable += 1 }
+            for entry in listing.entries {
+                guard entry.error == 0 else { unreadable += 1; continue }
+                // Sub-folder dates record files added or removed inside them.
+                if entry.kind == .file || entry.kind == .folder, let modified = entry.modified,
+                   modified > (newest ?? .distantPast) {
+                    newest = modified
+                }
+                switch entry.kind {
+                case .file: total += entry.attributedBytes
+                case .folder where entry.device == item.device && !entry.isMountPoint:
+                    pending.append(folder + "/" + entry.name)
+                default: break
+                }
+            }
         }
-        return total
+        return SizeMeasurement(bytes: total, newestModification: newest, unreadableFolders: unreadable)
     }
 }

@@ -2,7 +2,6 @@
 set -euo pipefail
 PROJECT_ROOT="${0:A:h:h}"
 cd "$PROJECT_ROOT"
-[[ "$(uname -m)" == "arm64" ]] || { print -u2 "Build this release on Apple Silicon."; exit 1; }
 ./Scripts/build-app.sh
 APP="$PROJECT_ROOT/dist/Mac Polish.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"

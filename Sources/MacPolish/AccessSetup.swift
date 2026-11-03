@@ -8,6 +8,7 @@ struct FolderAccessResult: Identifiable, Sendable, Codable {
         case restricted = "Access restricted"
         case missing = "Not present"
         case unavailable = "Could not verify"
+        case timedOut = "No answer in time"
     }
     var id: String { url.path }
     let name: String
@@ -44,6 +45,30 @@ enum FolderAccessCheck {
         return .unavailable
     }
 
+    typealias LocationReader = @Sendable (String, URL) -> Result<[FolderAccessResult], DiskScanFailure>
+
+    /// Checks each folder in its own worker. A macOS access prompt waits for the user, so a folder
+    /// that does not answer in time is reported on its own instead of failing the whole check.
+    static func checkAll(timeout: TimeInterval = 90, reader: LocationReader? = nil) -> (results: [FolderAccessResult], warning: String?) {
+        let read = reader ?? { name, _ in
+            DiskScanService.read(FolderAccessResult.self, mode: "access", arguments: ["--location", name], timeout: timeout)
+        }
+        let locations = locations()
+        let answers = DiskScanService.concurrentMap(locations.indices.map { $0 }) { read(locations[$0].0, locations[$0].1) }
+        let results = zip(locations, answers).map { location, answer -> FolderAccessResult in
+            switch answer {
+            case .success(let found):
+                return found.first { $0.name == location.0 } ?? FolderAccessResult(name: location.0, url: location.1, status: .unavailable)
+            case .failure(let failure):
+                return FolderAccessResult(name: location.0, url: location.1, status: failure.timedOut ? .timedOut : .unavailable)
+            }
+        }
+        let waiting = results.contains { $0.status == .timedOut }
+        return (results, waiting
+            ? "Some folders did not answer in time. If macOS is showing an access request, respond to it, then choose Recheck Folder Access."
+            : nil)
+    }
+
     static func locations(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [(String, URL)] {
         [ ("Desktop", home.appending(path: "Desktop")),
           ("Documents", home.appending(path: "Documents")),
@@ -77,17 +102,10 @@ final class AccessSetupModel: ObservableObject {
         results = []
         checkWarning = nil
         Task {
-            let measured = await Task.detached(priority: .utility) {
-                DiskScanService.read(FolderAccessResult.self, mode: "access", timeout: 30)
-            }.value
-            switch measured {
-            case .success(let results):
-                self.results = results
-                checkedAt = Date()
-            case .failure(let failure):
-                checkedAt = nil
-                checkWarning = failure.message
-            }
+            let measured = await BackgroundWork.run(qos: .utility) { FolderAccessCheck.checkAll() }
+            results = measured.results
+            checkWarning = measured.warning
+            checkedAt = Date()
             checking = false
         }
     }
