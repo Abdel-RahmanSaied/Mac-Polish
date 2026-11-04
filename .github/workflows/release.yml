@@ -42,7 +42,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "Mac Polish $GITHUB_REF_NAME — Storage Map & Safer Cleanup" --notes-file docs/release-0.9.0.md dist/Mac-Polish-*-macos-arm64.zip dist/install.sh dist/SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "Mac Polish $GITHUB_REF_NAME — Stable Signing & Permission Fixes" --notes-file "docs/release-${GITHUB_REF_NAME#v}.md" dist/Mac-Polish-*-macos-arm64.zip dist/install.sh dist/SHA256SUMS.txt
       - name: Remove signing keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/macpolish-signing.keychain-db" 2>/dev/null || true

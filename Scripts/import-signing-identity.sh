@@ -12,7 +12,12 @@ KEYCHAIN_PASSWORD="$(/usr/bin/openssl rand -hex 24)"
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security set-keychain-settings -lut 3600 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-security import "$P12" -k "$KEYCHAIN" -P "${MACPOLISH_SIGNING_P12_PASSWORD:?Set MACPOLISH_SIGNING_P12_PASSWORD}" -T /usr/bin/codesign >/dev/null
+# --keychain on codesign restricts certificate lookup; private-key lookup also uses this list.
+typeset -a SEARCH_KEYCHAINS
+SEARCH_KEYCHAINS=("${(@f)$(security list-keychains -d user | sed 's/^ *"//; s/"$//')}")
+security list-keychains -d user -s "$KEYCHAIN" "${SEARCH_KEYCHAINS[@]}"
+[[ -n "${MACPOLISH_SIGNING_P12_PASSWORD:-}" ]] || { print -u2 "Set the encrypted backup password."; exit 1; }
+security import "$P12" -k "$KEYCHAIN" -P "$MACPOLISH_SIGNING_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
 # This keychain holds only the imported identity, so allowing codesign for all its keys is scoped to it.
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 NAME="$(security find-identity -p codesigning "$KEYCHAIN" | sed -n 's/^ *[0-9]*) [0-9A-F]* "\(.*\)".*/\1/p' | head -1)"

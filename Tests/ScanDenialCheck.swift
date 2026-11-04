@@ -55,6 +55,22 @@ enum ScanDenialCheck {
         precondition(downloads.items.map(\.url.lastPathComponent) == ["installer.dmg"], "Readable Downloads items are kept")
         precondition(downloads.deniedPaths == [privateFolder.path], "The denied sub-folder is reported, got \(downloads.deniedPaths)")
 
+        // A readable cache root can still contain inaccessible content. Keep its partial
+        // measurement, report the exact denied child, and never preselect it for cleanup.
+        _ = try file("Library/Caches/example/visible.bin")
+        let nestedCache = try folder("Library/Caches/example/locked")
+        _ = try file("Library/Caches/example/locked/secret.bin")
+        try lock(nestedCache)
+        let partialCache = scanner.report(section: .caches)
+        precondition(partialCache.deniedPaths == [nestedCache.path])
+        precondition(partialCache.items.count == 1 && !partialCache.items[0].isMeasurementComplete
+                     && !partialCache.items[0].isSelected)
+        let entirelyClosed = try folder("Library/Caches/entirely-closed")
+        _ = try file("Library/Caches/entirely-closed/hidden.bin")
+        try lock(entirelyClosed)
+        precondition(scanner.report(section: .caches).deniedPaths.contains(entirelyClosed.path),
+                     "A zero-byte partial measurement must still report its denial")
+
         // Trash, caches and developer folders: the same rule for the child listings.
         let trash = try folder(".Trash")
         _ = try file(".Trash/old.zip")
@@ -105,6 +121,16 @@ enum ScanDenialCheck {
         precondition(duplicateWarning?.contains("Movies-denied") == true && duplicateWarning?.contains("checked for duplicates") == true,
                      "The duplicate warning names the folder: \(duplicateWarning ?? "nil")")
         precondition(AccessWarning.denied([], purpose: "checked for duplicates") == nil, "No denial, no warning")
+
+        // Listing/metadata can succeed while reading a candidate's contents fails.
+        let unreadableFile = shared.appending(path: "b.jpg")
+        try lock(unreadableFile)
+        let hashDenied = DuplicateScanner().report(minimumSize: 1_024 * 1_024, roots: [shared])
+        precondition(hashDenied.items.isEmpty && hashDenied.deniedPaths == [unreadableFile.path],
+                     "A fingerprint read denial must warn rather than claim a complete empty result")
+        let serialized = try JSONEncoder().encode(hashDenied)
+        let decoded = try JSONDecoder().decode(ScanReport<DuplicateFile>.self, from: serialized)
+        precondition(decoded.deniedPaths == [unreadableFile.path])
 
         // The real worker returns the section report, including the denial list.
         guard case .success(let logs) = DiskScanService.readValue(ScanReport<ScanItem>.self, mode: "basic",

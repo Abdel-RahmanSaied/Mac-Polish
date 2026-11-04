@@ -17,8 +17,6 @@ jobs:
         run: swift build
       - name: Regression checks
         run: Scripts/test.sh
-      - name: Signing checks (temporary keychain)
-        run: Tests/SigningCheck.sh
       - name: Validate scripts and bundle metadata
         run: |
           bash -n Scripts/install.sh
@@ -27,3 +25,18 @@ jobs:
             Scripts/import-signing-identity.sh Tests/SigningCheck.sh
           plutil -lint Resources/Info.plist
           git diff --check
+
+  signing:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Host runtime protection diagnostics
+        run: |
+          uname -m
+          csrutil status
+          sysctl kern.bootargs
+      - name: Signing checks (temporary keychain)
+        run: Tests/SigningCheck.sh

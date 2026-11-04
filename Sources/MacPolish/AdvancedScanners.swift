@@ -141,7 +141,9 @@ struct DuplicateScanner: Sendable {
         for (size, urls) in bySize where urls.count > 1 {
             var byHash: [String: [URL]] = [:]
             for url in urls {
-                guard let digest = fingerprint(of: url) else { continue }
+                let digest: String
+                do { digest = try FileFingerprint.sha256(url) }
+                catch { denied.note(url, error); continue }
                 byHash[digest, default: []].append(url)
             }
             for (digest, matches) in byHash where matches.count > 1 {
@@ -165,9 +167,6 @@ struct DuplicateScanner: Sendable {
         return ScanReport(items: sorted, deniedPaths: denied.paths)
     }
 
-    private func fingerprint(of url: URL) -> String? {
-        try? FileFingerprint.sha256(url)
-    }
 
 }
 
@@ -296,8 +295,10 @@ enum FileSizeCalculator {
     }
 
     /// Walks the item on its own volume without following symbolic links or entering mount points.
-    static func measure(_ url: URL) -> SizeMeasurement {
+    static func measure(_ url: URL, onReadError: ((URL, Int32) -> Void)? = nil) -> SizeMeasurement {
         guard let item = FileAttributes.read(path: url.path) else {
+            let error = errno
+            onReadError?(url, error)
             return SizeMeasurement(bytes: 0, newestModification: nil, unreadableFolders: 1)
         }
         switch item.kind {
@@ -312,9 +313,16 @@ enum FileSizeCalculator {
         var pending = [url.path]
         while let folder = pending.popLast() {
             let listing = BulkDirectoryReader.entries(of: folder)
-            if listing.error != nil { unreadable += 1 }
+            if let error = listing.error {
+                unreadable += 1
+                onReadError?(URL(fileURLWithPath: folder), error)
+            }
             for entry in listing.entries {
-                guard entry.error == 0 else { unreadable += 1; continue }
+                guard entry.error == 0 else {
+                    unreadable += 1
+                    onReadError?(URL(fileURLWithPath: folder).appendingPathComponent(entry.name), entry.error)
+                    continue
+                }
                 // Sub-folder dates record files added or removed inside them.
                 if entry.kind == .file || entry.kind == .folder, let modified = entry.modified,
                    modified > (newest ?? .distantPast) {
