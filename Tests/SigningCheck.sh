@@ -122,7 +122,11 @@ codesign --force --sign - "$UNHARDENED" >/dev/null 2>&1
 injected() { DYLD_INSERT_LIBRARIES="$WORK/probe.dylib" "$1/Contents/MacOS/MacPolish" --scan-worker basic 2>&1 || true }
 [[ "$(injected "$UNHARDENED")" == *PROBE-LOADED* ]] || fail "control: the probe library must load into an unhardened copy"
 for app in "$STABLE" "$ADHOC"; do
-  [[ "$(injected "$app")" != *PROBE-LOADED* ]] || fail "an injected library ran inside $app"
+  INJECTION_OUTPUT="$(injected "$app")"
+  if [[ "$INJECTION_OUTPUT" == *PROBE-LOADED* ]]; then
+    print -u2 -- "$INJECTION_OUTPUT"
+    fail "an injected library ran inside $app"
+  fi
 done
 ok "control copy loads the library; hardened copies do not"
 
