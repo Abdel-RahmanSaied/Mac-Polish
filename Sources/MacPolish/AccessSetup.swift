@@ -106,10 +106,10 @@ enum FolderAccessCheck {
     }
 }
 
-/// Whether Mac Polish has Full Disk Access, read from folders that only Full Disk Access opens.
+/// Observed read access to selected protected locations; this does not certify the TCC grant.
 /// None of them shows a macOS prompt, so checking is always silent.
 enum FullDiskAccess: String, Codable, Sendable {
-    case granted, notGranted, unknown
+    case accessible, restricted, unknown
 
     static func probes(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [URL] {
         [URL(fileURLWithPath: "/Library/Application Support/com.apple.TCC"),
@@ -118,17 +118,19 @@ enum FullDiskAccess: String, Codable, Sendable {
          home.appending(path: "Library/Mail")]
     }
 
-    /// One readable probe proves the grant; a refused probe with none readable means no grant.
+    /// Reports only access to the tested locations, not the macOS Full Disk Access grant.
+    /// A denial takes precedence regardless of probe order; missing/failed probes leave uncertainty.
     static func status(probes: [URL] = probes()) -> FullDiskAccess {
-        var refused = false
+        var readable = false
+        var uncertain = false
         for url in probes {
             switch FolderAccessCheck.check(name: url.lastPathComponent, url: url).status {
-            case .readable: return .granted
-            case .restricted: refused = true
-            case .missing, .unavailable, .timedOut: continue
+            case .readable: readable = true
+            case .restricted: return .restricted
+            case .missing, .unavailable, .timedOut: uncertain = true
             }
         }
-        return refused ? .notGranted : .unknown
+        return readable && !uncertain ? .accessible : .unknown
     }
 }
 
@@ -136,8 +138,8 @@ enum FullDiskAccess: String, Codable, Sendable {
 extension FullDiskAccess {
     var label: String {
         switch self {
-        case .granted: "On"
-        case .notGranted: "Off"
+        case .accessible: "Tested locations readable"
+        case .restricted: "Some access restricted"
         case .unknown: "Could not verify"
         }
     }
@@ -166,7 +168,7 @@ enum SigningIdentity {
 @MainActor
 final class AccessSetupModel: ObservableObject {
     static let completedKey = "accessSetupCompletedV1"
-    /// Set while Full Disk Access is seen granted; cleared when the user continues without it.
+    /// Remembers readable probes; cleared when the user acknowledges restricted access.
     static let fullDiskAccessSeenKey = "fullDiskAccessSeenV1"
     typealias FullDiskAccessProbe = @Sendable () -> FullDiskAccess
     private let defaults: UserDefaults
@@ -179,7 +181,7 @@ final class AccessSetupModel: ObservableObject {
     @Published var checkWarning: String?
     @Published var cleanupContext: [CleanupIssue] = []
     @Published var fullDiskAccess: FullDiskAccess?
-    /// Full Disk Access was on at an earlier launch and is off now (an update signed differently, or a settings change).
+    /// Previously readable probes now include a restricted location.
     @Published var accessLost = false
     /// True for an ad-hoc signed copy: macOS asks for every permission again after each update.
     let permissionsResetOnUpdate = SigningIdentity.currentRequirement().map(SigningIdentity.pinsPermissionsToBuild) ?? false
@@ -193,7 +195,7 @@ final class AccessSetupModel: ObservableObject {
         presented = !defaults.bool(forKey: Self.completedKey)
     }
 
-    /// Run at launch. Reopens setup when Full Disk Access was granted before and is missing now.
+    /// Reopens setup if previously readable probes become restricted.
     func verifyOnLaunch() async {
         let probe = probe
         record(await BackgroundWork.run(qos: .utility) { probe() })
@@ -202,13 +204,13 @@ final class AccessSetupModel: ObservableObject {
     private func record(_ status: FullDiskAccess) {
         fullDiskAccess = status
         switch status {
-        case .granted:
+        case .accessible:
             defaults.set(true, forKey: Self.fullDiskAccessSeenKey)
             accessLost = false
-        case .notGranted where defaults.bool(forKey: Self.fullDiskAccessSeenKey):
+        case .restricted where defaults.bool(forKey: Self.fullDiskAccessSeenKey):
             accessLost = true
             presented = true
-        case .notGranted, .unknown:
+        case .restricted, .unknown:
             break
         }
     }
@@ -237,7 +239,7 @@ final class AccessSetupModel: ObservableObject {
     func finish() {
         defaults.set(true, forKey: Self.completedKey)
         // Continuing without Full Disk Access is the user's choice; do not reopen setup for it at every launch.
-        if fullDiskAccess == .notGranted { defaults.removeObject(forKey: Self.fullDiskAccessSeenKey) }
+        if fullDiskAccess == .restricted { defaults.removeObject(forKey: Self.fullDiskAccessSeenKey) }
         accessLost = false
         presented = false
         settingsPresented = false
@@ -268,8 +270,8 @@ struct AccessSetupView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     if access.accessLost {
                         VStack(alignment: .leading, spacing: 8) {
-                            Label("Full Disk Access is off", systemImage: "exclamationmark.shield").font(.headline)
-                            Text("Mac Polish had Full Disk Access before. macOS turns it off when an update is signed differently, or when it is turned off in System Settings.")
+                            Label("Access to protected locations changed", systemImage: "exclamationmark.shield").font(.headline)
+                            Text("Previously readable locations are now restricted. Review folder permissions and privacy settings; an update with a different signing identity can also affect access.")
                                 .font(.callout)
                             Text("If Mac Polish still looks enabled in Full Disk Access, select it, remove it with −, then add this copy again with +.")
                                 .font(.caption).foregroundStyle(.secondary)
@@ -303,10 +305,10 @@ struct AccessSetupView: View {
                         }
                         if let status = access.fullDiskAccess {
                             HStack {
-                                Text("Full Disk Access")
+                                Text("Protected locations")
                                 Spacer()
-                                Label(status.label, systemImage: status == .granted ? "checkmark.circle.fill" : "info.circle")
-                                    .foregroundStyle(status == .granted ? Color.green : Color.secondary)
+                                Label(status.label, systemImage: status == .accessible ? "checkmark.circle.fill" : "info.circle")
+                                    .foregroundStyle(status == .accessible ? Color.green : Color.secondary)
                             }.font(.callout)
                         }
                         if access.permissionsResetOnUpdate {
@@ -348,7 +350,7 @@ struct AccessSetupView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    Text("Checks verify directory reading, not permission to delete every file. Full Disk Access is read from folders only it opens; this never shows a prompt. Protected areas may still be unavailable. You can continue with a limited scan and revisit this setup in Settings.")
+                    Text("Checks verify directory reading at the tested locations, not the Full Disk Access setting or permission to delete every file. Other protected areas may still be unavailable. You can continue with a limited scan and revisit this setup in Settings.")
                         .font(.caption).foregroundStyle(.secondary)
                     Label("Memory monitoring works without additional permissions.", systemImage: "memorychip")
                         .font(.caption).foregroundStyle(.secondary)

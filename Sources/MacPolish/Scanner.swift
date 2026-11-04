@@ -81,13 +81,15 @@ struct DiskScanner: Sendable {
         return children.compactMap { url -> ScanItem? in
             guard !excludedNames.contains(url.lastPathComponent), !isSymbolicLink(url) else { return nil }
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-            return item(url: url, category: category, modifiedAt: values?.contentModificationDate)
+            return item(url: url, category: category, modifiedAt: values?.contentModificationDate, denied: denied)
         }
     }
 
     /// Measures the item and lets the shared cleanup policy decide whether it starts selected.
-    private func item(url: URL, category: ScanCategory, modifiedAt: Date?) -> ScanItem? {
-        let measurement = FileSizeCalculator.measure(url)
+    private func item(url: URL, category: ScanCategory, modifiedAt: Date?, denied: DeniedFolders) -> ScanItem? {
+        let measurement = FileSizeCalculator.measure(url) { path, code in
+            denied.note(path, NSError(domain: NSPOSIXErrorDomain, code: Int(code)))
+        }
         guard measurement.bytes > 0 else { return nil }
         var item = ScanItem(
             url: url,
@@ -252,7 +254,7 @@ struct DiskScanner: Sendable {
                   let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
                   let modifiedAt = values.contentModificationDate,
                   modifiedAt < cutoff else { return nil }
-            return item(url: url, category: category, modifiedAt: modifiedAt)
+            return item(url: url, category: category, modifiedAt: modifiedAt, denied: denied)
         }
     }
 
@@ -267,7 +269,7 @@ struct DiskScanner: Sendable {
             guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { continue }
             if values.isDirectory == true {
                 if values.isPackage == true {
-                    if let item = item(url: url, category: .largeFile, modifiedAt: values.contentModificationDate),
+                    if let item = item(url: url, category: .largeFile, modifiedAt: values.contentModificationDate, denied: denied),
                        item.size >= minimumSize {
                         items.append(item)
                     }

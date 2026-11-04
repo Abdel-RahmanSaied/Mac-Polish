@@ -14,6 +14,15 @@ BUNDLE="${1:?Usage: sign-app.sh <bundle>}"
 ROOT="${0:A:h:h}"
 DEFAULT_IDENTITY="${MACPOLISH_DEFAULT_IDENTITY:-Mac Polish Local Signing}"
 typeset -a KEYCHAIN_LIST KEYCHAIN_OPTION ENTITLEMENTS_OPTION
+# One persistent local identity, stored outside the checkout, is reused by every worktree.
+# Its unlock password is kept in the login Keychain, never in this repository.
+LOCAL_KEYCHAIN="$HOME/Library/Application Support/MacPolish Signing/signing.keychain-db"
+if [[ -z "${MACPOLISH_SIGN_KEYCHAIN:-}" && -z "${MACPOLISH_SIGN_IDENTITY:-}" && -f "$LOCAL_KEYCHAIN" ]]; then
+  LOCAL_PASSWORD="$(security find-generic-password -a "$USER" -s com.asaied.macpolish.signing-keychain -w)"
+  security unlock-keychain -p "$LOCAL_PASSWORD" "$LOCAL_KEYCHAIN"
+  unset LOCAL_PASSWORD
+  MACPOLISH_SIGN_KEYCHAIN="$LOCAL_KEYCHAIN"
+fi
 if [[ -n "${MACPOLISH_SIGN_KEYCHAIN:-}" ]]; then
   KEYCHAIN_LIST=("$MACPOLISH_SIGN_KEYCHAIN")
   KEYCHAIN_OPTION=(--keychain "$MACPOLISH_SIGN_KEYCHAIN")

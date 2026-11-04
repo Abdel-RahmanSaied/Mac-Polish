@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// Setup must show whether Full Disk Access is on, notice when an earlier grant is gone,
+/// Setup must describe observed protected-folder access and notice new restrictions,
 /// and link to every Privacy & Security pane it mentions.
 @main
 enum FullDiskAccessCheck {
@@ -20,15 +20,20 @@ enum FullDiskAccessCheck {
         }
         let missing = root.appending(path: "missing")
 
-        // Probes are folders only Full Disk Access opens; one readable probe proves the grant.
-        precondition(FullDiskAccess.status(probes: [open]) == .granted)
-        precondition(FullDiskAccess.status(probes: [closed, open]) == .granted)
-        precondition(FullDiskAccess.status(probes: [missing, closed]) == .notGranted, "A refused probe means no grant")
+        // Probe results describe observed access, never the system Full Disk Access toggle.
+        precondition(FullDiskAccess.status(probes: [open]) == .accessible)
+        precondition(FullDiskAccess.status(probes: [closed, open]) == .restricted)
+        precondition(FullDiskAccess.status(probes: [missing, closed]) == .restricted, "A refused probe means no grant")
+        precondition(FullDiskAccess.status(probes: [open, closed]) == .restricted, "A later denial cannot be hidden by an earlier readable folder")
+        precondition(FullDiskAccess.status(probes: [open, missing]) == .unknown)
+        precondition(FullDiskAccess.status(probes: []) == .unknown)
+        precondition(FullDiskAccess.accessible.label == "Tested locations readable")
+        precondition(FullDiskAccess.restricted.label == "Some access restricted")
         precondition(FullDiskAccess.status(probes: [missing]) == .unknown, "No probe present: cannot tell")
         let defaults = FullDiskAccess.probes().map(\.path)
         precondition(defaults.contains("/Library/Application Support/com.apple.TCC") && defaults.contains { $0.hasSuffix("/.Trash") },
                      "Default probes include folders that never show a prompt")
-        print("  this process: Full Disk Access \(FullDiskAccess.status().rawValue)")
+        print("  this process: protected-location access \(FullDiskAccess.status().rawValue)")
 
         // The worker answers the same question with the app's identity.
         guard case .success = DiskScanService.readValue(FullDiskAccess.self, mode: "full-disk-access", timeout: 30) else {
@@ -40,20 +45,20 @@ enum FullDiskAccessCheck {
         let store = UserDefaults(suiteName: suite)!
         defer { store.removePersistentDomain(forName: suite) }
         store.set(true, forKey: AccessSetupModel.completedKey)
-        let granted = AccessSetupModel(defaults: store, probe: { .granted })
+        let granted = AccessSetupModel(defaults: store, probe: { .accessible })
         await granted.verifyOnLaunch()
-        precondition(granted.fullDiskAccess == .granted && !granted.presented && !granted.accessLost)
+        precondition(granted.fullDiskAccess == .accessible && !granted.presented && !granted.accessLost)
         precondition(store.bool(forKey: AccessSetupModel.fullDiskAccessSeenKey), "A grant is remembered")
 
         // Break caught: an update signed differently silently dropping Full Disk Access.
-        let lost = AccessSetupModel(defaults: store, probe: { .notGranted })
+        let lost = AccessSetupModel(defaults: store, probe: { .restricted })
         precondition(!lost.presented, "Completed setup does not open by itself")
         await lost.verifyOnLaunch()
-        precondition(lost.presented && lost.accessLost && lost.fullDiskAccess == .notGranted, "A lost grant reopens setup")
+        precondition(lost.presented && lost.accessLost && lost.fullDiskAccess == .restricted, "A lost grant reopens setup")
         // Continuing without it is the user's choice: do not ask again at every launch.
         lost.finish()
         precondition(!lost.accessLost && !store.bool(forKey: AccessSetupModel.fullDiskAccessSeenKey))
-        let acknowledged = AccessSetupModel(defaults: store, probe: { .notGranted })
+        let acknowledged = AccessSetupModel(defaults: store, probe: { .restricted })
         await acknowledged.verifyOnLaunch()
         precondition(!acknowledged.presented && !acknowledged.accessLost, "An acknowledged choice is respected")
         let undecided = AccessSetupModel(defaults: store, probe: { .unknown })
@@ -76,6 +81,6 @@ enum FullDiskAccessCheck {
         guard let own = SigningIdentity.currentRequirement() else { preconditionFailure("The running code has a designated requirement") }
         // swiftc signs test binaries ad hoc, so this one is pinned to its build.
         precondition(SigningIdentity.pinsPermissionsToBuild(own), "Ad-hoc test binary requirement: \(own)")
-        print("PASS: Full Disk Access is probed without prompts, a lost grant reopens setup once, panes open System Settings, build-pinned signing is detected")
+        print("PASS: protected-location probes preserve uncertainty and denials, lost access reopens setup once, panes open System Settings, build-pinned signing is detected")
     }
 }

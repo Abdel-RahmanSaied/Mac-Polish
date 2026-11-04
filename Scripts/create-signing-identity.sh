@@ -55,6 +55,12 @@ EOF
 TRANSFER_PASSWORD="$(/usr/bin/openssl rand -hex 16)"
 /usr/bin/openssl pkcs12 -export -inkey "$WORK/key.pem" -in "$WORK/certificate.pem" -name "$NAME" \
   -passout "pass:$TRANSFER_PASSWORD" -out "$WORK/identity.p12" 2>/dev/null
+# codesign also needs the private-key keychain in the user search list on clean CI hosts.
+if [[ -n "$KEYCHAIN" ]]; then
+  typeset -a SEARCH_KEYCHAINS
+  SEARCH_KEYCHAINS=("${(@f)$(security list-keychains -d user | sed 's/^ *"//; s/"$//')}")
+  security list-keychains -d user -s "$KEYCHAIN" "${SEARCH_KEYCHAINS[@]}"
+fi
 security import "$WORK/identity.p12" "${IMPORT_TARGET[@]}" -P "$TRANSFER_PASSWORD" -T /usr/bin/codesign >/dev/null
 if [[ -n "${MACPOLISH_KEYCHAIN_PASSWORD:-}" ]]; then
   # Only this identity's key (matched by label), never the keychain's other keys.
