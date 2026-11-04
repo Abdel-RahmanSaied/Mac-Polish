@@ -22,7 +22,7 @@ jobs:
           bash -n Scripts/install.sh
           zsh -n Scripts/build-app.sh Scripts/package-release.sh Scripts/test.sh Scripts/build-ui-e2e.sh \
             Scripts/sign-app.sh Scripts/verify-release-signature.sh Scripts/create-signing-identity.sh \
-            Scripts/import-signing-identity.sh Tests/SigningCheck.sh
+            Scripts/import-signing-identity.sh Tests/SigningCheck.sh Tests/InstallerCheck.sh
           plutil -lint Resources/Info.plist
           git diff --check
 

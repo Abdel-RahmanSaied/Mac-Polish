@@ -41,27 +41,28 @@ enum FullDiskAccessCheck {
         }
 
         // Launch check: a grant seen before and missing now reopens setup with an explanation.
+        // No copies are injected: other copies of the app installed on this Mac are AppCopiesCheck's concern.
         let suite = "MacPolish-fda-test-" + UUID().uuidString
         let store = UserDefaults(suiteName: suite)!
         defer { store.removePersistentDomain(forName: suite) }
         store.set(true, forKey: AccessSetupModel.completedKey)
-        let granted = AccessSetupModel(defaults: store, probe: { .accessible })
+        let granted = AccessSetupModel(defaults: store, probe: { .accessible }, copies: { [] })
         await granted.verifyOnLaunch()
         precondition(granted.fullDiskAccess == .accessible && !granted.presented && !granted.accessLost)
         precondition(store.bool(forKey: AccessSetupModel.fullDiskAccessSeenKey), "A grant is remembered")
 
         // Break caught: an update signed differently silently dropping Full Disk Access.
-        let lost = AccessSetupModel(defaults: store, probe: { .restricted })
+        let lost = AccessSetupModel(defaults: store, probe: { .restricted }, copies: { [] })
         precondition(!lost.presented, "Completed setup does not open by itself")
         await lost.verifyOnLaunch()
         precondition(lost.presented && lost.accessLost && lost.fullDiskAccess == .restricted, "A lost grant reopens setup")
         // Continuing without it is the user's choice: do not ask again at every launch.
         lost.finish()
         precondition(!lost.accessLost && !store.bool(forKey: AccessSetupModel.fullDiskAccessSeenKey))
-        let acknowledged = AccessSetupModel(defaults: store, probe: { .restricted })
+        let acknowledged = AccessSetupModel(defaults: store, probe: { .restricted }, copies: { [] })
         await acknowledged.verifyOnLaunch()
         precondition(!acknowledged.presented && !acknowledged.accessLost, "An acknowledged choice is respected")
-        let undecided = AccessSetupModel(defaults: store, probe: { .unknown })
+        let undecided = AccessSetupModel(defaults: store, probe: { .unknown }, copies: { [] })
         await undecided.verifyOnLaunch()
         precondition(!undecided.presented && undecided.fullDiskAccess == .unknown)
 

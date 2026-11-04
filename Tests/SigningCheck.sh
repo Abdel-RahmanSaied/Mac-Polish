@@ -14,8 +14,11 @@ CI_KEYCHAIN="$WORK/ci-import.keychain-db"
 BACKUP_PASSWORD="macpolish-backup-test"
 KEYCHAIN_PASSWORD="macpolish-signing-test"
 IDENTITY="Mac Polish Test Signing"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 cleanup() {
   pkill -f "$WORK/QuitTarget.app/Contents/MacOS/QuitTarget" 2>/dev/null || true
+  # Helper apps opened with `open` are registered with Launch Services; remove them with the fixtures.
+  find "$WORK" -name '*.app' -prune -exec "$LSREGISTER" -u {} \; 2>/dev/null || true
   security delete-keychain "$KEYCHAIN" 2>/dev/null || true
   security delete-keychain "$CI_KEYCHAIN" 2>/dev/null || true
   rm -rf -- "$WORK"

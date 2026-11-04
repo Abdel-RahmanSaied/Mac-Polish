@@ -165,14 +165,74 @@ enum SigningIdentity {
     }
 }
 
+/// Another copy of Mac Polish on this Mac.
+struct AppCopy: Identifiable, Sendable, Equatable {
+    var id: String { url.path }
+    let url: URL
+    let version: String?
+    /// False when the copy does not meet the running copy's signing requirement, so it can take its permissions.
+    let sameSignature: Bool
+}
+
+/// Copies of Mac Polish known to Launch Services. macOS keeps one permission entry per bundle identifier:
+/// opening a differently signed copy, or adding it in Full Disk Access, moves the permission to that copy.
+enum AppCopies {
+    static let bundleIdentifier = "com.asaied.macpolish"
+
+    /// Existing copies other than `running`, outside the Trash, sorted by path.
+    static func others(running: URL = Bundle.main.bundleURL,
+                       requirement: String? = SigningIdentity.currentRequirement(),
+                       registered: [URL]? = nil) -> [AppCopy] {
+        let candidates = registered ?? NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleIdentifier)
+        var seen: Set<String> = [running.resolvingSymlinksInPath().standardizedFileURL.path]
+        return candidates.compactMap { url -> AppCopy? in
+            let resolved = url.resolvingSymlinksInPath().standardizedFileURL
+            guard seen.insert(resolved.path).inserted, !resolved.path.contains("/.Trash/"),
+                  FileManager.default.fileExists(atPath: resolved.path) else { return nil }
+            let version = Bundle(url: resolved)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            return AppCopy(url: resolved, version: version,
+                           sameSignature: requirement.map { satisfies(resolved, requirement: $0) } ?? false)
+        }.sorted { $0.url.path < $1.url.path }
+    }
+
+    /// The designated requirement of the bundle at `url`.
+    static func requirement(of url: URL) -> String? {
+        guard let code = staticCode(url) else { return nil }
+        var requirement: SecRequirement?
+        guard SecCodeCopyDesignatedRequirement(code, [], &requirement) == errSecSuccess, let requirement else { return nil }
+        var text: CFString?
+        guard SecRequirementCopyString(requirement, [], &text) == errSecSuccess, let text else { return nil }
+        return text as String
+    }
+
+    /// True when the bundle at `url` has a valid signature that meets `requirement`, the check macOS makes
+    /// before it honours a stored permission.
+    static func satisfies(_ url: URL, requirement: String) -> Bool {
+        guard let code = staticCode(url) else { return false }
+        var compiled: SecRequirement?
+        guard SecRequirementCreateWithString(requirement as CFString, [], &compiled) == errSecSuccess, let compiled else { return false }
+        return SecStaticCodeCheckValidity(code, [], compiled) == errSecSuccess
+    }
+
+    private static func staticCode(_ url: URL) -> SecStaticCode? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess else { return nil }
+        return code
+    }
+}
+
 @MainActor
 final class AccessSetupModel: ObservableObject {
     static let completedKey = "accessSetupCompletedV1"
     /// Remembers readable probes; cleared when the user acknowledges restricted access.
     static let fullDiskAccessSeenKey = "fullDiskAccessSeenV1"
+    /// The differently signed copies the user last continued past; a new set opens setup again.
+    static let dismissedCopiesKey = "otherCopiesDismissedV1"
     typealias FullDiskAccessProbe = @Sendable () -> FullDiskAccess
+    typealias CopiesFinder = @Sendable () -> [AppCopy]
     private let defaults: UserDefaults
     private let probe: FullDiskAccessProbe
+    private let copies: CopiesFinder
     @Published var presented: Bool
     @Published var settingsPresented = false
     @Published var checking = false
@@ -183,11 +243,16 @@ final class AccessSetupModel: ObservableObject {
     @Published var fullDiskAccess: FullDiskAccess?
     /// Previously readable probes now include a restricted location.
     @Published var accessLost = false
+    /// Other copies of Mac Polish on this Mac.
+    @Published var otherCopies: [AppCopy] = []
+    /// Copies that can take this copy's permissions if they are opened or added in Full Disk Access.
+    var conflictingCopies: [AppCopy] { otherCopies.filter { !$0.sameSignature } }
     /// True for an ad-hoc signed copy: macOS asks for every permission again after each update.
     let permissionsResetOnUpdate = SigningIdentity.currentRequirement().map(SigningIdentity.pinsPermissionsToBuild) ?? false
 
-    init(defaults: UserDefaults = .standard, probe: FullDiskAccessProbe? = nil) {
+    init(defaults: UserDefaults = .standard, probe: FullDiskAccessProbe? = nil, copies: CopiesFinder? = nil) {
         self.defaults = defaults
+        self.copies = copies ?? { AppCopies.others() }
         // The worker reads with the app's identity, exactly as scans do.
         self.probe = probe ?? {
             (try? DiskScanService.readValue(FullDiskAccess.self, mode: "full-disk-access", timeout: 20).get()) ?? .unknown
@@ -196,9 +261,20 @@ final class AccessSetupModel: ObservableObject {
     }
 
     /// Reopens setup if previously readable probes become restricted.
+    /// Also opens setup once for each new set of differently signed copies of Mac Polish.
     func verifyOnLaunch() async {
         let probe = probe
-        record(await BackgroundWork.run(qos: .utility) { probe() })
+        let copies = copies
+        async let status = BackgroundWork.run(qos: .utility) { probe() }
+        async let found = BackgroundWork.run(qos: .utility) { copies() }
+        record(await status)
+        otherCopies = await found
+        let conflicting = Self.copiesKey(conflictingCopies)
+        if !conflicting.isEmpty && conflicting != defaults.string(forKey: Self.dismissedCopiesKey) { presented = true }
+    }
+
+    private static func copiesKey(_ copies: [AppCopy]) -> String {
+        copies.map(\.url.path).sorted().joined(separator: "\n")
     }
 
     private func record(_ status: FullDiskAccess) {
@@ -224,11 +300,14 @@ final class AccessSetupModel: ObservableObject {
         results = []
         checkWarning = nil
         let probe = probe
+        let copies = copies
         Task {
             async let measured = BackgroundWork.run(qos: .utility) { FolderAccessCheck.checkAll() }
             async let status = BackgroundWork.run(qos: .utility) { probe() }
+            async let found = BackgroundWork.run(qos: .utility) { copies() }
             let folders = await measured
             record(await status)
+            otherCopies = await found
             results = folders.results
             checkWarning = folders.warning
             checkedAt = Date()
@@ -240,6 +319,7 @@ final class AccessSetupModel: ObservableObject {
         defaults.set(true, forKey: Self.completedKey)
         // Continuing without Full Disk Access is the user's choice; do not reopen setup for it at every launch.
         if fullDiskAccess == .restricted { defaults.removeObject(forKey: Self.fullDiskAccessSeenKey) }
+        defaults.set(Self.copiesKey(conflictingCopies), forKey: Self.dismissedCopiesKey)
         accessLost = false
         presented = false
         settingsPresented = false
@@ -277,6 +357,28 @@ struct AccessSetupView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }.padding(14).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                     }
+                    if !access.otherCopies.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label(access.conflictingCopies.isEmpty ? "Other copies of Mac Polish" : "Another copy can take Full Disk Access",
+                                  systemImage: "square.on.square").font(.headline)
+                            Text("macOS keeps one permission entry for Mac Polish. Opening another copy, or adding it in Full Disk Access, can move the permission to that copy. Keep the copy you use and move the others to the Trash.")
+                                .font(.callout)
+                            Text("This copy: " + Bundle.main.bundleURL.path).font(.caption).textSelection(.enabled)
+                            ForEach(access.otherCopies) { copy in
+                                HStack(alignment: .firstTextBaseline) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(copy.url.path).font(.caption).textSelection(.enabled).lineLimit(2)
+                                        Text([copy.version.map { "Version " + $0 }, copy.sameSignature ? nil : "signed differently"]
+                                            .compactMap { $0 }.joined(separator: " · "))
+                                            .font(.caption2).foregroundStyle(copy.sameSignature ? Color.secondary : Color.orange)
+                                    }
+                                    Spacer()
+                                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([copy.url]) }
+                                        .controlSize(.small)
+                                }
+                            }
+                        }.padding(14).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                    }
                     if !access.cleanupContext.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Label("Cleanup needs file access", systemImage: "exclamationmark.lock").font(.headline)
@@ -303,6 +405,7 @@ struct AccessSetupView: View {
                             Button("Open Full Disk Access") { access.openFullDiskAccess() }
                             Button("Show This App in Finder") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
                         }
+                        Text("Add this copy: " + Bundle.main.bundleURL.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         if let status = access.fullDiskAccess {
                             HStack {
                                 Text("Protected locations")

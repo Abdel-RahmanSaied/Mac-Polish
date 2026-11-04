@@ -220,12 +220,16 @@ Scripts/test.sh ScanDenialCheck
 Scripts/test.sh AccessPromptOrderCheck
 Scripts/test.sh RemovalRightsCheck
 Scripts/test.sh FullDiskAccessCheck
+Scripts/test.sh AppCopiesCheck
+Scripts/test.sh InstallerCheck
 ```
 
 - `ScanDenialCheck`: يقفل مجلدات تجريبية (`chmod 000`) ويتحقق من أن الفحص والمكررات تعرض المجلد المرفوض في تحذير يذكر Full Disk Access وFiles & Folders، بدل عرضه فارغًا، ومنفصلًا عن انتهاء المهلة.
 - `AccessPromptOrderCheck`: تُفحص Desktop وDocuments وDownloads واحدًا تلو الآخر، لكل منها مهلته كاملة، بينما تعمل المجلدات الأخرى بالتوازي.
 - `RemovalRightsCheck`: يمنع نقل مجلد بلا صلاحية كتابة قبل المحاولة، ويصنّف الخطأ الحقيقي من Trash كقراءة فقط وليس Full Disk Access، ويفرّق بين EACCES وEPERM وApp Management، ويعلّم التطبيقات التي تحتاج مسؤولًا. يقرأ تطبيقًا حقيقيًا يملكه حساب آخر في /Applications للقراءة فقط، دون نقل أي شيء.
 - `FullDiskAccessCheck`: يقرأ Full Disk Access من مجلدات لا تُظهر طلبًا، ويعيد فتح الإعداد مرة واحدة عند فقدان صلاحية كانت ممنوحة، ويتحقق من أن كل رابط يفتح System Settings، ويكتشف التوقيع المرتبط بنسخة واحدة.
+- `AppCopiesCheck`: يبني نسخًا حقيقية موقّعة بنفس bundle identifier، ويميّز النسخة الموقّعة بشكل مختلف عبر فحص التوقيع الفعلي، ويتجاهل Trash والمسارات المحذوفة، ويفتح الإعداد مرة واحدة لكل مجموعة جديدة من النسخ المتعارضة.
+- `InstallerCheck` (يعمل ضمن `Scripts/test.sh`): يشغّل `install.sh` الحقيقي على إصدارات تجريبية داخل مجلد home مؤقت. يتحقق من بقاء نسخة واحدة فقط في Applications، وحفظ الإصدار السابق كملف zip واحد يمكن استعادته، ونقل مجلدات `MacPolish-backup.*` القديمة إلى Trash دون لمس المجلدات الأخرى، ورفض checksum خاطئ أو مجلد مفقود قبل نقل أي شيء. يزيل كل نسخ الاختبار من Launch Services بعد انتهائه.
 
 
 ## اختبار أخطاء النقل وطلب الوصول
