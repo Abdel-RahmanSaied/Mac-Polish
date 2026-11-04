@@ -133,7 +133,7 @@ for app in "$STABLE" "$ADHOC"; do
     fi
   fi
 done
-ok "control copy loads the library; hardened copies do not"
+ok "runtime injection test completed; SIP-disabled CI limits are reported above"
 
 print "Release verification"
 "$ROOT/Scripts/verify-release-signature.sh" "$STABLE" >/dev/null || fail "a stable, hardened signature must pass"
@@ -196,4 +196,4 @@ QUIT_RESULT="$(cat "$WORK/quit-result" 2>/dev/null || print missing)"
 [[ "$QUIT_RESULT" == terminated ]] || fail "a hardened app could not quit another app: $QUIT_RESULT"
 ok "a hardened app still quits another app normally"
 
-print "PASS: stable identity keeps permissions across builds, hardened runtime blocks injection, releases refuse weak signatures, Quit still works"
+print "PASS: stable signing requirements, hardened signature checks, release gates and Quit; see host-specific injection results above"
