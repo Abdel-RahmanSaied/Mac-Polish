@@ -7,6 +7,6 @@
 
 Migration: the previous public build was ad-hoc signed. This first stable-signed update may require granting file access again. Future releases retain the same identity while the signing certificate is unchanged. Cross-build and backup-restore signing requirements have been verified; actual TCC permission retention through two installed updates has not yet been verified.
 
-Validation: 21 local regression checks, signing/injection/Quit checks, isolated real-Trash E2E, and a full local release build using SDK 26.5 passed. Manual testing covered Settings, Memory, Cleanup partial results and Duplicates timeout reporting. The folder-access check can take about 4.5 minutes if all three personal-folder checks time out. App Management behavior with/without Full Disk Access is not exhaustively tested.
+Validation: 21 local regression checks, signing/injection/Quit checks, isolated real-Trash E2E, and a full local release build using SDK 26.5 passed. Manual testing covered Settings, Memory, Cleanup partial results and Duplicates timeout reporting. The folder-access check can take about 4.5 minutes if all three personal-folder checks time out. GitHub macOS runners have SIP disabled, so they cannot validate runtime injection prevention; that behavioral test passed on the local Mac. App Management behavior with/without Full Disk Access is not exhaustively tested.
 
 Apple Silicon, macOS 14+. Preview release, self-signed (not Apple-notarized). No privacy settings are changed by the installer; macOS remains in control of access.
