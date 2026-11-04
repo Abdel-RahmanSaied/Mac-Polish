@@ -30,14 +30,18 @@ enum TrashValidationCheck {
         precondition(TrashValidation.preflight(root.appending(path: "missing"))?.kind == .missing)
         precondition(TrashValidation.isGoModuleCache(URL(fileURLWithPath: "/tmp/pkg/mod/example.org/a.go")))
         precondition(!TrashValidation.isGoModuleCache(URL(fileURLWithPath: "/tmp/gomodcache-notes/a.go")))
+        // Privacy refusals (EPERM, or a refusal the item's own permissions do not explain) need a privacy setting.
         for error in [NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError),
                       NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError),
-                      NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM)),
-                      NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))] {
+                      NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))] {
             precondition(TrashValidation.issue(for: error, url: denied).needsAccess)
         }
+        // EACCES is the file's own permissions: Full Disk Access cannot help, so it is not offered.
         let nested = NSError(domain: "Fixture", code: 9, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))])
-        precondition(TrashValidation.issue(for: nested, url: denied).needsAccess)
+        for error in [NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES)), nested] {
+            let issue = TrashValidation.issue(for: error, url: denied)
+            precondition(issue.kind == .readOnly && !issue.needsAccess, "EACCES on your own file is read-only, got \(issue.kind)")
+        }
         let readOnlyError = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError,
                                     userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EROFS))])
         precondition(TrashValidation.issue(for: readOnlyError, url: denied).kind == .readOnly)
@@ -69,6 +73,6 @@ enum TrashValidationCheck {
         }
         precondition(model.access.presented)
         precondition(model.duplicateState == .ready && model.duplicateFiles.count == 3)
-        print("PASS: typed permission errors, managed/read-only preflight, partial success, failed selection retention, access setup without automatic retry")
+        print("PASS: typed privacy and ownership errors, managed/read-only preflight, partial success, failed selection retention, access setup without automatic retry")
     }
 }

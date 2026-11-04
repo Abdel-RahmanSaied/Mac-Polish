@@ -21,11 +21,11 @@ enum ScanWorker {
             case "basic":
                 if let name = value(after: "--section") {
                     guard let section = DiskScanner.Section(rawValue: name) else { return 2 }
-                    try write(DiskScanner().scan(section: section))
+                    try write(DiskScanner().report(section: section))
                 } else {
                     try write(DiskScanner().scan(includeLargeFiles: arguments.contains("--include-large-files")))
                 }
-            case "duplicates": try write(DuplicateScanner().scan())
+            case "duplicates": try write(DuplicateScanner().report())
             case "applications": try write(ApplicationScanner().scan())
             case "tree":
                 guard let request = treeRequest(arguments) else { return 2 }
@@ -36,6 +36,7 @@ enum ScanWorker {
                 let locations = FolderAccessCheck.locations().filter { requested == nil || $0.0 == requested }
                 guard !locations.isEmpty else { return 2 }
                 try write(locations.map { FolderAccessCheck.check(name: $0.0, url: $0.1) })
+            case "full-disk-access": try write(FullDiskAccess.status())
             default: return 2
             }
             return 0

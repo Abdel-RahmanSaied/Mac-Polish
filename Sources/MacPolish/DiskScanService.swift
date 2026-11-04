@@ -5,16 +5,22 @@ struct DiskScanFailure: Error, Sendable {
     var timedOut = false
 }
 
-/// Items from the sections that finished, and the sections that did not.
+/// Items from the sections that finished, the sections that did not, and the sections macOS denied.
 struct DiskScanOutcome: Sendable {
     let items: [ScanItem]
     let incomplete: [DiskScanner.Section]
+    /// Sections that answered but could not open some or all of their folders.
+    var denied: [DiskScanner.Section] = []
 
     var warning: String? {
-        guard !incomplete.isEmpty else { return nil }
-        let names = incomplete.map(\.displayName).joined(separator: ", ")
-        return "Some locations could not be read: \(names). Results from the other locations are shown. "
-            + "A folder, cloud provider or macOS access request may be waiting; review scan permissions and scan again."
+        var parts: [String] = []
+        if let denial = AccessWarning.denied(denied.map(\.displayName), purpose: "scanned") { parts.append(denial) }
+        if !incomplete.isEmpty {
+            let names = incomplete.map(\.displayName).joined(separator: ", ")
+            parts.append("Some locations could not be read: \(names). Results from the other locations are shown. "
+                + "A folder, cloud provider or macOS access request may be waiting; review scan permissions and scan again.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 }
 
@@ -29,24 +35,27 @@ final class LockedResults<Value: Sendable>: @unchecked Sendable {
 
 /// Read-only filesystem workers have a deadline, including if a provider or macOS access request stalls.
 enum DiskScanService {
-    typealias SectionReader = @Sendable (DiskScanner.Section) -> Result<[ScanItem], DiskScanFailure>
+    typealias SectionReader = @Sendable (DiskScanner.Section) -> Result<ScanReport<ScanItem>, DiskScanFailure>
 
     /// Scans each section in its own worker, concurrently, so one stalled location cannot discard the rest.
     /// Fails only when no section could be read.
     static func scan(includeLargeFiles: Bool = true, timeout: TimeInterval = 60,
                      reader: SectionReader? = nil) -> Result<DiskScanOutcome, DiskScanFailure> {
         let read = reader ?? { section in
-            Self.read(ScanItem.self, mode: "basic", arguments: ["--section", section.rawValue], timeout: timeout)
+            Self.readValue(ScanReport<ScanItem>.self, mode: "basic", arguments: ["--section", section.rawValue], timeout: timeout)
         }
         let sections = DiskScanner.Section.allCases.filter { includeLargeFiles || !$0.isLargeFileFolder }
         let results = concurrentMap(sections, read)
 
         var items: [ScanItem] = []
         var incomplete: [DiskScanner.Section] = []
+        var denied: [DiskScanner.Section] = []
         var failures: [DiskScanFailure] = []
         for (section, result) in zip(sections, results) {
             switch result {
-            case .success(let found): items += found
+            case .success(let found):
+                items += found.items
+                if !found.deniedPaths.isEmpty { denied.append(section) }
             case .failure(let failure): incomplete.append(section); failures.append(failure)
             }
         }
@@ -54,7 +63,7 @@ enum DiskScanService {
             return .failure(failures.first(where: \.timedOut) ?? failures.first
                 ?? DiskScanFailure(message: "Reading files could not finish. Review scan permissions and try again."))
         }
-        return .success(DiskScanOutcome(items: DiskScanner.sorted(items), incomplete: incomplete))
+        return .success(DiskScanOutcome(items: DiskScanner.sorted(items), incomplete: incomplete, denied: denied))
     }
 
     /// Runs blocking work for every input at once on GCD and returns results in input order.

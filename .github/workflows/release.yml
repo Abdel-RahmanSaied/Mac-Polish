@@ -14,6 +14,23 @@ jobs:
           persist-credentials: false
       - name: Regression checks
         run: Scripts/test.sh
+      # One certificate for every release keeps the designated requirement, so users keep their permissions.
+      - name: Import signing identity
+        env:
+          MACPOLISH_SIGNING_P12_BASE64: ${{ secrets.MACPOLISH_SIGNING_P12_BASE64 }}
+          MACPOLISH_SIGNING_P12_PASSWORD: ${{ secrets.MACPOLISH_SIGNING_P12_PASSWORD }}
+        run: |
+          if [ -z "$MACPOLISH_SIGNING_P12_BASE64" ] || [ -z "$MACPOLISH_SIGNING_P12_PASSWORD" ]; then
+            echo "::error::Add the MACPOLISH_SIGNING_P12_BASE64 and MACPOLISH_SIGNING_P12_PASSWORD secrets (see CONTRIBUTING.md)."
+            exit 1
+          fi
+          P12="$RUNNER_TEMP/macpolish-signing.p12"
+          KEYCHAIN="$RUNNER_TEMP/macpolish-signing.keychain-db"
+          printf '%s' "$MACPOLISH_SIGNING_P12_BASE64" | base64 --decode > "$P12"
+          NAME="$(Scripts/import-signing-identity.sh "$P12" "$KEYCHAIN")"
+          rm -f "$P12"
+          echo "MACPOLISH_SIGN_IDENTITY=$NAME" >> "$GITHUB_ENV"
+          echo "MACPOLISH_SIGN_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
       - name: Build and verify Apple Silicon package
         run: |
           VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
@@ -26,3 +43,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "Mac Polish $GITHUB_REF_NAME — Storage Map & Safer Cleanup" --notes-file docs/release-0.9.0.md dist/Mac-Polish-*-macos-arm64.zip dist/install.sh dist/SHA256SUMS.txt
+      - name: Remove signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/macpolish-signing.keychain-db" 2>/dev/null || true

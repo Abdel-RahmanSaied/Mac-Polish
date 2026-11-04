@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 import SwiftUI
 
 struct FolderAccessResult: Identifiable, Sendable, Codable {
@@ -14,6 +15,21 @@ struct FolderAccessResult: Identifiable, Sendable, Codable {
     let name: String
     let url: URL
     let status: Status
+}
+
+/// Privacy & Security panes Mac Polish can open. The user decides there; Mac Polish never changes settings.
+enum PrivacyPane: String, CaseIterable, Sendable {
+    case fullDiskAccess = "Privacy_AllFiles"
+    case filesAndFolders = "Privacy_FilesAndFolders"
+    case appManagement = "Privacy_AppBundles"
+
+    var url: URL { URL(string: "x-apple.systempreferences:com.apple.preference.security?" + rawValue)! }
+
+    @MainActor func open() {
+        if !NSWorkspace.shared.open(url) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+        }
+    }
 }
 
 enum FolderAccessCheck {
@@ -45,16 +61,27 @@ enum FolderAccessCheck {
         return .unavailable
     }
 
+    /// Folders macOS asks about with a prompt (Files & Folders). macOS shows one prompt at a time.
+    static let promptingLocations = ["Desktop", "Documents", "Downloads"]
+
     typealias LocationReader = @Sendable (String, URL) -> Result<[FolderAccessResult], DiskScanFailure>
 
     /// Checks each folder in its own worker. A macOS access prompt waits for the user, so a folder
     /// that does not answer in time is reported on its own instead of failing the whole check.
+    /// Prompting folders are checked one after another, each with the full `timeout`: started together,
+    /// the prompts would queue on screen while their deadlines ran at the same time.
     static func checkAll(timeout: TimeInterval = 90, reader: LocationReader? = nil) -> (results: [FolderAccessResult], warning: String?) {
         let read = reader ?? { name, _ in
             DiskScanService.read(FolderAccessResult.self, mode: "access", arguments: ["--location", name], timeout: timeout)
         }
         let locations = locations()
-        let answers = DiskScanService.concurrentMap(locations.indices.map { $0 }) { read(locations[$0].0, locations[$0].1) }
+        let prompting = locations.indices.filter { promptingLocations.contains(locations[$0].0) }
+        let jobs = [prompting] + locations.indices.filter { !prompting.contains($0) }.map { [$0] }
+        let answered = DiskScanService.concurrentMap(jobs) { job in
+            job.map { ($0, read(locations[$0].0, locations[$0].1)) }
+        }.flatMap { $0 }
+        let byIndex = Dictionary(uniqueKeysWithValues: answered)
+        let answers = locations.indices.map { byIndex[$0]! }
         let results = zip(locations, answers).map { location, answer -> FolderAccessResult in
             switch answer {
             case .success(let found):
@@ -79,10 +106,71 @@ enum FolderAccessCheck {
     }
 }
 
+/// Whether Mac Polish has Full Disk Access, read from folders that only Full Disk Access opens.
+/// None of them shows a macOS prompt, so checking is always silent.
+enum FullDiskAccess: String, Codable, Sendable {
+    case granted, notGranted, unknown
+
+    static func probes(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [URL] {
+        [URL(fileURLWithPath: "/Library/Application Support/com.apple.TCC"),
+         home.appending(path: ".Trash"),
+         home.appending(path: "Library/Safari"),
+         home.appending(path: "Library/Mail")]
+    }
+
+    /// One readable probe proves the grant; a refused probe with none readable means no grant.
+    static func status(probes: [URL] = probes()) -> FullDiskAccess {
+        var refused = false
+        for url in probes {
+            switch FolderAccessCheck.check(name: url.lastPathComponent, url: url).status {
+            case .readable: return .granted
+            case .restricted: refused = true
+            case .missing, .unavailable, .timedOut: continue
+            }
+        }
+        return refused ? .notGranted : .unknown
+    }
+}
+
+/// How this copy is signed. macOS stores each privacy permission with the app's designated requirement.
+extension FullDiskAccess {
+    var label: String {
+        switch self {
+        case .granted: "On"
+        case .notGranted: "Off"
+        case .unknown: "Could not verify"
+        }
+    }
+}
+
+enum SigningIdentity {
+    /// The designated requirement of the running code, for example `cdhash H"…"` for an ad-hoc signature.
+    static func currentRequirement() -> String? {
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else { return nil }
+        var requirement: SecRequirement?
+        guard SecCodeCopyDesignatedRequirement(staticCode, [], &requirement) == errSecSuccess, let requirement else { return nil }
+        var text: CFString?
+        guard SecRequirementCopyString(requirement, [], &text) == errSecSuccess, let text else { return nil }
+        return text as String
+    }
+
+    /// True when the requirement names one exact build, so every update starts without permissions.
+    static func pinsPermissionsToBuild(_ requirement: String) -> Bool {
+        requirement.trimmingCharacters(in: .whitespaces).hasPrefix("cdhash")
+    }
+}
+
 @MainActor
 final class AccessSetupModel: ObservableObject {
     static let completedKey = "accessSetupCompletedV1"
+    /// Set while Full Disk Access is seen granted; cleared when the user continues without it.
+    static let fullDiskAccessSeenKey = "fullDiskAccessSeenV1"
+    typealias FullDiskAccessProbe = @Sendable () -> FullDiskAccess
     private let defaults: UserDefaults
+    private let probe: FullDiskAccessProbe
     @Published var presented: Bool
     @Published var settingsPresented = false
     @Published var checking = false
@@ -90,21 +178,57 @@ final class AccessSetupModel: ObservableObject {
     @Published var checkedAt: Date?
     @Published var checkWarning: String?
     @Published var cleanupContext: [CleanupIssue] = []
+    @Published var fullDiskAccess: FullDiskAccess?
+    /// Full Disk Access was on at an earlier launch and is off now (an update signed differently, or a settings change).
+    @Published var accessLost = false
+    /// True for an ad-hoc signed copy: macOS asks for every permission again after each update.
+    let permissionsResetOnUpdate = SigningIdentity.currentRequirement().map(SigningIdentity.pinsPermissionsToBuild) ?? false
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, probe: FullDiskAccessProbe? = nil) {
         self.defaults = defaults
+        // The worker reads with the app's identity, exactly as scans do.
+        self.probe = probe ?? {
+            (try? DiskScanService.readValue(FullDiskAccess.self, mode: "full-disk-access", timeout: 20).get()) ?? .unknown
+        }
         presented = !defaults.bool(forKey: Self.completedKey)
     }
+
+    /// Run at launch. Reopens setup when Full Disk Access was granted before and is missing now.
+    func verifyOnLaunch() async {
+        let probe = probe
+        record(await BackgroundWork.run(qos: .utility) { probe() })
+    }
+
+    private func record(_ status: FullDiskAccess) {
+        fullDiskAccess = status
+        switch status {
+        case .granted:
+            defaults.set(true, forKey: Self.fullDiskAccessSeenKey)
+            accessLost = false
+        case .notGranted where defaults.bool(forKey: Self.fullDiskAccessSeenKey):
+            accessLost = true
+            presented = true
+        case .notGranted, .unknown:
+            break
+        }
+    }
+
+    /// True when a folder check found a folder macOS refused, which Files & Folders can allow.
+    var hasRestrictedFolder: Bool { results.contains { $0.status == .restricted } }
 
     func check() {
         guard !checking else { return }
         checking = true
         results = []
         checkWarning = nil
+        let probe = probe
         Task {
-            let measured = await BackgroundWork.run(qos: .utility) { FolderAccessCheck.checkAll() }
-            results = measured.results
-            checkWarning = measured.warning
+            async let measured = BackgroundWork.run(qos: .utility) { FolderAccessCheck.checkAll() }
+            async let status = BackgroundWork.run(qos: .utility) { probe() }
+            let folders = await measured
+            record(await status)
+            results = folders.results
+            checkWarning = folders.warning
             checkedAt = Date()
             checking = false
         }
@@ -112,6 +236,9 @@ final class AccessSetupModel: ObservableObject {
 
     func finish() {
         defaults.set(true, forKey: Self.completedKey)
+        // Continuing without Full Disk Access is the user's choice; do not reopen setup for it at every launch.
+        if fullDiskAccess == .notGranted { defaults.removeObject(forKey: Self.fullDiskAccessSeenKey) }
+        accessLost = false
         presented = false
         settingsPresented = false
         cleanupContext = []
@@ -122,11 +249,11 @@ final class AccessSetupModel: ObservableObject {
         settingsPresented = true
     }
 
+    /// True when macOS App Management blocked removing an app, which Full Disk Access does not cover.
+    var needsAppManagement: Bool { cleanupContext.contains { $0.kind == .appManagement } }
+
     func openFullDiskAccess() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!
-        if !NSWorkspace.shared.open(url) {
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
-        }
+        PrivacyPane.fullDiskAccess.open()
     }
 }
 
@@ -139,6 +266,15 @@ struct AccessSetupView: View {
             Text("Set up file access once, before scanning.").foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    if access.accessLost {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Full Disk Access is off", systemImage: "exclamationmark.shield").font(.headline)
+                            Text("Mac Polish had Full Disk Access before. macOS turns it off when an update is signed differently, or when it is turned off in System Settings.")
+                                .font(.callout)
+                            Text("If Mac Polish still looks enabled in Full Disk Access, select it, remove it with −, then add this copy again with +.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }.padding(14).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                    }
                     if !access.cleanupContext.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Label("Cleanup needs file access", systemImage: "exclamationmark.lock").font(.headline)
@@ -146,6 +282,11 @@ struct AccessSetupView: View {
                                 .font(.callout)
                             ForEach(access.cleanupContext.prefix(3)) { issue in
                                 Text(issue.url.path).font(.caption).textSelection(.enabled).lineLimit(2)
+                            }
+                            if access.needsAppManagement {
+                                Text("Removing apps also needs App Management: System Settings → Privacy & Security → App Management. Enable Mac Polish there.")
+                                    .font(.callout)
+                                Button("Open App Management") { PrivacyPane.appManagement.open() }
                             }
                             Text("Full Disk Access does not unlock files or change ownership, folder write permissions or ACLs. If access still fails, review the containing folder in Finder.")
                                 .font(.caption).foregroundStyle(.secondary)
@@ -159,6 +300,18 @@ struct AccessSetupView: View {
                         HStack {
                             Button("Open Full Disk Access") { access.openFullDiskAccess() }
                             Button("Show This App in Finder") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
+                        }
+                        if let status = access.fullDiskAccess {
+                            HStack {
+                                Text("Full Disk Access")
+                                Spacer()
+                                Label(status.label, systemImage: status == .granted ? "checkmark.circle.fill" : "info.circle")
+                                    .foregroundStyle(status == .granted ? Color.green : Color.secondary)
+                            }.font(.callout)
+                        }
+                        if access.permissionsResetOnUpdate {
+                            Text("This copy is signed for this build only, so macOS asks for these permissions again after each update.")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }.padding(16).background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
                     VStack(alignment: .leading, spacing: 10) {
@@ -181,6 +334,13 @@ struct AccessSetupView: View {
                                     .foregroundStyle(result.status == .readable ? Color.green : Color.secondary)
                             }.font(.callout)
                         }
+                        if access.hasRestrictedFolder {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text("If you chose Don't Allow for a folder, allow Mac Polish for it in Files & Folders, or turn on Full Disk Access.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button("Open Files & Folders") { PrivacyPane.filesAndFolders.open() }.controlSize(.small)
+                            }
+                        }
                         Text("Xcode user data checks ~/Library/Developer only. This optional folder may not exist until Xcode or simulators create it. It does not indicate whether Command Line Tools are installed.")
                             .font(.caption).foregroundStyle(.secondary)
                         if let checkedAt = access.checkedAt {
@@ -188,7 +348,7 @@ struct AccessSetupView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    Text("Checks verify directory reading, not permission to delete every file or a system-wide Full Disk Access grant. Protected areas may still be unavailable. You can continue with a limited scan and revisit this setup in Settings.")
+                    Text("Checks verify directory reading, not permission to delete every file. Full Disk Access is read from folders only it opens; this never shows a prompt. Protected areas may still be unavailable. You can continue with a limited scan and revisit this setup in Settings.")
                         .font(.caption).foregroundStyle(.secondary)
                     Label("Memory monitoring works without additional permissions.", systemImage: "memorychip")
                         .font(.caption).foregroundStyle(.secondary)

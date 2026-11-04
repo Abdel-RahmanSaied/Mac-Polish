@@ -22,7 +22,7 @@ struct ApplicationsView: View {
             Button("Cancel", role: .cancel) {}
             Button("Move to Trash", role: .destructive) { model.removeSelectedApplications() }
         } message: {
-            Text("The selected apps and detected user-library leftovers will be moved to Trash. System apps are protected.")
+            Text("The selected apps and detected user-library leftovers will be moved to Trash. System apps are protected. Apps marked as needing an administrator can be removed in Finder.")
         }
     }
 
@@ -39,7 +39,7 @@ struct ApplicationsView: View {
                 HStack(spacing: 14) {
                     Toggle("", isOn: selectionBinding(for: application))
                         .labelsHidden()
-                        .disabled(!application.canRemove)
+                        .disabled(!application.canRemove || application.removalNote != nil)
                     Image(nsImage: NSWorkspace.shared.icon(forFile: application.url.path))
                         .resizable()
                         .scaledToFit()
@@ -51,6 +51,10 @@ struct ApplicationsView: View {
                                 Label("Protected", systemImage: "lock.fill")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
+                            } else if application.removalNote != nil {
+                                Label("Needs an administrator", systemImage: "person.badge.key")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
                             }
                         }
                         Text([application.version.map { "Version \($0)" }, application.bundleIdentifier].compactMap { $0 }.joined(separator: " · "))
@@ -61,6 +65,10 @@ struct ApplicationsView: View {
                             Text("\(application.leftoverURLs.count) related item(s) · \(application.leftoverSize.formattedBytes)")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
+                        }
+                        if let note = application.removalNote {
+                            Text(note).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     Spacer()
@@ -117,6 +125,17 @@ struct DuplicatesView: View {
                 isBusy: model.duplicateState == .loading,
                 action: { model.findDuplicates(force: true) }
             )
+
+            if let warning = model.duplicateWarning, model.duplicateState == .ready {
+                HStack(spacing: 10) {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Review Scan Permissions…") { model.access.presented = true }
+                }
+                .padding(.horizontal, 30).padding(.bottom, 12)
+            }
 
             if case .failed(let message) = model.duplicateState {
             ScanFailureView(message: message)
@@ -250,7 +269,7 @@ struct StorageMapView: View {
                     ProgressView().controlSize(.large)
                     Text("Reading every folder on the startup disk…").font(.headline)
                     if let started = model.storageStarted { ScanElapsedView(started: started) }
-                    Text("Folders protected by macOS are read separately; you may be asked to allow access.")
+                    Text("Folders protected by macOS are read separately. macOS may ask about Desktop, Documents and Downloads; other apps' data needs Full Disk Access.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -349,11 +368,7 @@ private struct DiskSummaryCard: View {
             }
             HStack {
                 if report.tree.root.unreadable > 0 {
-                    Button("Open Full Disk Access Settings…") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
+                    Button("Open Full Disk Access Settings…") { PrivacyPane.fullDiskAccess.open() }
                 }
                 if report.tree.root.notScanned > 0 {
                     Button("Review Scan Permissions…") { model.access.presented = true }

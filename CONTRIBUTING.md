@@ -22,7 +22,24 @@ swift run MacPolish
 open "dist/Mac Polish.app"
 ```
 
-أغلق النسخة المفتوحة وافتح النسخة الجديدة بعد البناء. التوقيع الناتج محلي ad-hoc، وليس توقيع نشر عام.
+أغلق النسخة المفتوحة وافتح النسخة الجديدة بعد البناء. التوقيع ذاتي، وليس توقيع Developer ID أو notarization للنشر العام؛ راجع «التوقيع والصلاحيات».
+
+### التوقيع والصلاحيات
+
+يحفظ macOS صلاحيات Full Disk Access وDesktop وDocuments وDownloads مرتبطة بمتطلب التوقيع (designated requirement) للتطبيق. التوقيع ad-hoc يربطها بنسخة بناء واحدة، فيفقد المستخدم كل الصلاحيات بعد أي تحديث. لذلك أنشئ هوية توقيع ثابتة مرة واحدة فقط:
+
+```sh
+MACPOLISH_EXPORT_PASSWORD='كلمة مرور قوية' Scripts/create-signing-identity.sh --export ~/MacPolish-signing.p12
+```
+
+بعدها يوقّع `Scripts/build-app.sh` كل نسخة بهذه الهوية تلقائيًا مع Hardened Runtime عبر `Scripts/sign-app.sh`. عند أول بناء قد يطلب macOS السماح لـcodesign باستخدام المفتاح؛ اختر Always Allow. بدون الهوية يوقّع السكريبت ad-hoc ويطبع تحذيرًا، ويرفض `Scripts/package-release.sh` إنشاء الإصدار إلا مع `MACPOLISH_ALLOW_ADHOC=1`. الإصدار بدون Hardened Runtime مرفوض دائمًا، لأن برنامجًا آخر يستطيع حقن مكتبة تعمل بصلاحية Full Disk Access الخاصة بالتطبيق.
+
+احتفظ بالنسخة الاحتياطية وكلمة مرورها في مكان آمن: فقدان الشهادة يغيّر المتطلب، فيضطر كل المستخدمين لمنح الصلاحيات من جديد. لإصدارات GitHub أضف سرّين في إعدادات المستودع:
+
+- `MACPOLISH_SIGNING_P12_BASE64`: ناتج `base64 -i ~/MacPolish-signing.p12 | pbcopy`
+- `MACPOLISH_SIGNING_P12_PASSWORD`: كلمة مرور النسخة الاحتياطية
+
+يستورد workflow الإصدار الهوية إلى keychain مؤقت عبر `Scripts/import-signing-identity.sh` ويحذفه في النهاية. يفشل الإصدار برسالة واضحة إذا كان السرّان غير موجودين.
 
 ## تنظيم المشروع
 
@@ -106,7 +123,16 @@ swift build
 Scripts/test.sh
 Scripts/test.sh CleanupPolicyCheck
 Scripts/test.sh --e2e
+Scripts/test.sh --signing
 ```
+
+الخيار `--signing` يشغّل كل الاختبارات ثم `Tests/SigningCheck.sh`. ينشئ هوية في keychain مؤقت ولا يلمس login keychain، ثم يوقّع حزمًا حقيقية مبنية من ملفات المصدر ويتحقق من:
+
+- أن بناءً جديدًا بنفس الهوية يحقق متطلب البناء السابق، كما يفعل macOS قبل الإبقاء على الصلاحيات، وأن بناء CI من النسخة الاحتياطية له المتطلب نفسه.
+- أن ad-hoc لا يحققه (اختبار ضابط يثبت أن الفحص يمكن أن يفشل)، وأن التطبيق يكتشف ذلك.
+- أن Hardened Runtime يتجاهل مكتبة محقونة، بينما تُحمَّل في نسخة ضابطة بدونه.
+- أن التحقق من الإصدار يرفض ad-hoc بدون موافقة صريحة، ويرفض غياب Hardened Runtime دائمًا.
+- أن إنهاء تطبيق آخر (Memory → Quit) ما زال يعمل مع Hardened Runtime.
 
 السكريبت يبني كل ملف في `Tests/` مع كل ملفات `Sources/MacPolish` عدا ملفات الواجهة ونقطة البداية (`MacPolishApp` و`main` و`ContentView` و`AdvancedViews`)، لذلك لا تحتاج تحديث قوائم الملفات عند إضافة ملف جديد. أضف اسم أي اختبار جديد إلى قائمة `CHECKS` في السكريبت. شغّل الأوامر من جذر المشروع.
 
@@ -189,6 +215,18 @@ Scripts/test.sh AccessSetupCheck
 
 يستخدم الاختبار مجلدًا مؤقتًا وإعدادات معزولة. لا يطلب صلاحيات macOS ولا يغيّر TCC. يغطي تمييز الوصول المرفوض والمجلد المفقود وخطأ القراءة، وعدم ادعاء الصلاحية عند تخطي الإعداد. يدويًا، راجع ظهور الشاشة أول مرة، والتخطي، وإعادة فتحها من Settings، وعدم بدء الفحص أثناء الإعداد. لا تغيّر صلاحيات النظام نيابة عن المستخدم أثناء الاختبار.
 
+```sh
+Scripts/test.sh ScanDenialCheck
+Scripts/test.sh AccessPromptOrderCheck
+Scripts/test.sh RemovalRightsCheck
+Scripts/test.sh FullDiskAccessCheck
+```
+
+- `ScanDenialCheck`: يقفل مجلدات تجريبية (`chmod 000`) ويتحقق من أن الفحص والمكررات تعرض المجلد المرفوض في تحذير يذكر Full Disk Access وFiles & Folders، بدل عرضه فارغًا، ومنفصلًا عن انتهاء المهلة.
+- `AccessPromptOrderCheck`: تُفحص Desktop وDocuments وDownloads واحدًا تلو الآخر، لكل منها مهلته كاملة، بينما تعمل المجلدات الأخرى بالتوازي.
+- `RemovalRightsCheck`: يمنع نقل مجلد بلا صلاحية كتابة قبل المحاولة، ويصنّف الخطأ الحقيقي من Trash كقراءة فقط وليس Full Disk Access، ويفرّق بين EACCES وEPERM وApp Management، ويعلّم التطبيقات التي تحتاج مسؤولًا. يقرأ تطبيقًا حقيقيًا يملكه حساب آخر في /Applications للقراءة فقط، دون نقل أي شيء.
+- `FullDiskAccessCheck`: يقرأ Full Disk Access من مجلدات لا تُظهر طلبًا، ويعيد فتح الإعداد مرة واحدة عند فقدان صلاحية كانت ممنوحة، ويتحقق من أن كل رابط يفتح System Settings، ويكتشف التوقيع المرتبط بنسخة واحدة.
+
 
 ## اختبار أخطاء النقل وطلب الوصول
 
@@ -196,4 +234,4 @@ Scripts/test.sh AccessSetupCheck
 Scripts/test.sh TrashValidationCheck
 ```
 
-ينشئ الاختبار مجلدًا معزولًا باسم فريد داخل Library/Caches، ويحقن عملية نقل تجريبية لا تحذف أو تنقل الملفات فعليًا. يغطي أخطاء Cocoa وPOSIX والأخطاء المتداخلة، وكاش Go والمجلدات للقراءة فقط، والنجاح الجزئي والاحتفاظ بالاختيارات الفاشلة وفتح شاشة الصلاحيات بدون إعادة تنفيذ التنظيف.
+ينشئ الاختبار مجلدًا معزولًا باسم فريد داخل Library/Caches، ويحقن عملية نقل تجريبية لا تحذف أو تنقل الملفات فعليًا. يغطي أخطاء Cocoa وPOSIX والأخطاء المتداخلة، والتفريق بين رفض الخصوصية (EPERM) وصلاحيات الملف (EACCES)، وكاش Go والمجلدات للقراءة فقط، والنجاح الجزئي والاحتفاظ بالاختيارات الفاشلة وفتح شاشة الصلاحيات بدون إعادة تنفيذ التنظيف.

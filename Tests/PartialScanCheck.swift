@@ -27,9 +27,9 @@ enum PartialScanCheck {
             calls.add(section.rawValue)
             switch section {
             case .downloads: return .failure(stalled)
-            case .caches: return .success(cacheItems)
-            case .documents: return .success(documentItems)
-            default: return .success([])
+            case .caches: return .success(ScanReport(items: cacheItems, deniedPaths: []))
+            case .documents: return .success(ScanReport(items: documentItems, deniedPaths: []))
+            default: return .success(ScanReport(items: [], deniedPaths: []))
             }
         }
         guard case .success(let outcome) = partial else { preconditionFailure("Readable sections must still produce results") }
@@ -41,7 +41,7 @@ enum PartialScanCheck {
 
         // Break caught: reading personal folders for large files when the setting is off.
         let withoutLarge = Calls()
-        _ = DiskScanService.scan(includeLargeFiles: false) { withoutLarge.add($0.rawValue); return .success([]) }
+        _ = DiskScanService.scan(includeLargeFiles: false) { withoutLarge.add($0.rawValue); return .success(ScanReport(items: [], deniedPaths: [])) }
         precondition(withoutLarge.all.isDisjoint(with: ["downloads", "documents", "desktop"]), "Large-file folders are skipped when disabled")
 
         // Break caught: reporting success when nothing could be read.
@@ -61,7 +61,7 @@ enum PartialScanCheck {
         precondition(FolderAccessCheck.checkAll { name, url in .success([FolderAccessResult(name: name, url: url, status: .readable)]) }.warning == nil)
 
         // The real worker honours the per-section and per-folder arguments (locations without macOS prompts).
-        guard case .success = DiskScanService.read(ScanItem.self, mode: "basic", arguments: ["--section", "logs"], timeout: 60) else {
+        guard case .success = DiskScanService.readValue(ScanReport<ScanItem>.self, mode: "basic", arguments: ["--section", "logs"], timeout: 60) else {
             preconditionFailure("The worker scans a single requested section")
         }
         guard case .success(let developer) = DiskScanService.read(FolderAccessResult.self, mode: "access", arguments: ["--location", "Xcode user data"], timeout: 30),

@@ -44,6 +44,8 @@ struct MacPolishApp: App {
                 .frame(minWidth: 1_050, minHeight: 680)
                 .task { model.memory.start() }
                 .task { model.updates.start() }
+                // Notices a Full Disk Access grant lost since the last launch, for example after an update.
+                .task { await model.access.verifyOnLaunch() }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1_180, height: 760)

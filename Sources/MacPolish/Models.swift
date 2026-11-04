@@ -148,6 +148,8 @@ struct ApplicationItem: Identifiable, Hashable, Sendable, Codable {
     let leftoverSize: Int64
     let canRemove: Bool
     var isSelected: Bool
+    /// Why this app cannot be moved to Trash by Mac Polish (for example, another account owns it).
+    var removalNote: String? = nil
 
     var totalSize: Int64 { size + leftoverSize }
 }
@@ -179,28 +181,43 @@ struct StartupEntry: Identifiable, Hashable, Sendable, Codable {
 
 struct CleanupIssue: Identifiable, Equatable, Sendable {
     enum Kind: String, Sendable {
-        case permission, managedCache, locked, readOnly, missing, unsafe, changed, alreadyInTrash, other
+        /// macOS privacy protection refused (EPERM): Full Disk Access or Files & Folders.
+        case permission
+        /// Another account owns the item (EACCES): an administrator must move it, for example in Finder.
+        case ownership
+        /// macOS App Management refused changing another app's bundle.
+        case appManagement
+        case managedCache, locked, readOnly, missing, unsafe, changed, alreadyInTrash, other
     }
     var id: String { url.path + ":" + kind.rawValue }
     let url: URL
     let kind: Kind
     let detail: String
-    var needsAccess: Bool { kind == .permission }
+    /// A macOS privacy setting can fix this; ownership and read-only problems cannot.
+    var needsAccess: Bool { kind == .permission || kind == .appManagement }
     var message: String { url.lastPathComponent + ": " + detail }
 
     static func summary(_ issues: [Self]) -> String {
-        let denied = issues.filter(\.needsAccess).count
+        let denied = issues.filter { $0.kind == .permission }.count
+        let appManagement = issues.filter { $0.kind == .appManagement }.count
+        let ownership = issues.filter { $0.kind == .ownership }.count
         let managed = issues.filter { $0.kind == .managedCache }.count
         let restricted = issues.filter { $0.kind == .locked || $0.kind == .readOnly }.count
         var messages: [String] = []
         if denied > 0 {
-            messages.append("\(denied) item(s) could not be moved because access was denied. Review folder permissions and Full Disk Access, then retry the selected items. Ownership, ACLs or file locks may also prevent moving them.")
+            messages.append("\(denied) item(s) could not be moved because macOS denied access. Review Full Disk Access for Mac Polish, then retry the selected items.")
+        }
+        if appManagement > 0 {
+            messages.append("\(appManagement) app(s) could not be removed because macOS App Management blocked it. Allow Mac Polish in Privacy & Security → App Management, then retry.")
+        }
+        if ownership > 0 {
+            messages.append("\(ownership) item(s) belong to another account, often an installer. An administrator must remove them: use Show in Finder, then Move to Trash, and enter an administrator password.")
         }
         if managed > 0 {
             messages.append("Skipped \(managed) managed dependency item(s). Use the owning package manager to manage these files; Full Disk Access does not change their filesystem permissions.")
         }
         if restricted > 0 { messages.append("\(restricted) item(s) are locked or in read-only locations. Review them in Finder.") }
-        let other = issues.filter { ![.permission, .managedCache, .locked, .readOnly].contains($0.kind) }
+        let other = issues.filter { ![.permission, .appManagement, .ownership, .managedCache, .locked, .readOnly].contains($0.kind) }
         messages += other.prefix(2).map(\.message)
         return messages.joined(separator: "\n\n")
     }

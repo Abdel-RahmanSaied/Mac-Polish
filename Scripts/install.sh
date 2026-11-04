@@ -35,11 +35,17 @@ ACTUAL="$(shasum -a 256 "$STAGING/$ASSET" | awk '{print $1}')"
 ditto -x -k "$STAGING/$ASSET" "$STAGING/unpacked"
 APP="$STAGING/unpacked/Mac Polish.app"
 codesign --verify --deep --strict "$APP"
+# The hardened runtime stops other programs from injecting code that would run with Mac Polish's Full Disk Access.
+SIGNATURE="$(codesign -dv "$APP" 2>&1)"
+case "$SIGNATURE" in
+    *flags=*runtime*) ;;
+    *) echo "The application is not signed with the hardened runtime." >&2; exit 1 ;;
+esac
 IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"
 BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 [ "$IDENTIFIER" = "com.asaied.macpolish" ] && [ "$BUNDLE_VERSION" = "$VERSION" ] || { echo "Unexpected application identity or version." >&2; exit 1; }
 lipo "$APP/Contents/MacOS/MacPolish" -verify_arch arm64
-echo "Download, checksum, application signature and architecture verified."
+echo "Download, checksum, application signature, hardened runtime and architecture verified."
 if [ "$VERIFY_ONLY" = true ]; then exit 0; fi
 
 if pgrep -x MacPolish >/dev/null; then
@@ -50,10 +56,16 @@ INSTALL_DIRECTORY="$HOME/Applications"
 DESTINATION="$INSTALL_DIRECTORY/Mac Polish.app"
 mkdir -p "$INSTALL_DIRECTORY"
 BACKUP=""
+SIGNED_DIFFERENTLY=false
 if [ -e "$DESTINATION" ] || [ -L "$DESTINATION" ]; then
     [ ! -L "$DESTINATION" ] || { echo "Refusing to replace a symbolic link." >&2; exit 1; }
     EXISTING_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$DESTINATION/Contents/Info.plist" 2>/dev/null || true)"
     [ "$EXISTING_ID" = "com.asaied.macpolish" ] || { echo "An unrelated app already exists at $DESTINATION." >&2; exit 1; }
+    # macOS keeps permissions for the installed app's signing requirement; tell the user if this version does not meet it.
+    PREVIOUS_REQUIREMENT="$(codesign -d -r- "$DESTINATION" 2>&1 | sed -n 's/^#* *designated => //p' || true)"
+    if [ -n "$PREVIOUS_REQUIREMENT" ] && ! codesign --verify -R="$PREVIOUS_REQUIREMENT" "$APP" >/dev/null 2>&1; then
+        SIGNED_DIFFERENTLY=true
+    fi
     BACKUP="$(mktemp -d "$INSTALL_DIRECTORY/MacPolish-backup.XXXXXX")"
     mv "$DESTINATION" "$BACKUP/Mac Polish.app"
 fi
@@ -70,5 +82,9 @@ fi
 echo "Installed: $DESTINATION"
 if [ -n "$BACKUP" ]; then echo "Previous version kept at: $BACKUP/Mac Polish.app"; fi
 echo "Open it from Finder in your Applications folder."
-echo "This personal release is ad-hoc signed, not Apple-notarized. macOS may ask you to approve it in Privacy & Security."
+if [ "$SIGNED_DIFFERENTLY" = true ]; then
+    echo "This version is signed differently from the one it replaced, so macOS asks again for Full Disk Access and folder access."
+    echo "In System Settings → Privacy & Security → Full Disk Access, remove the old Mac Polish entry with −, then add this copy with +."
+fi
+echo "This personal release is not Apple-notarized. macOS may ask you to approve it in Privacy & Security."
 echo "No security settings were changed. The application has not been launched."

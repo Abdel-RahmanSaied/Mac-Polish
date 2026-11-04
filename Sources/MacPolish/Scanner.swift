@@ -42,20 +42,29 @@ struct DiskScanner: Sendable {
     }
 
     func scan(section: Section) -> [ScanItem] {
+        report(section: section).items
+    }
+
+    /// The section's items and the folders macOS would not let it open.
+    func report(section: Section) -> ScanReport<ScanItem> {
+        let denied = DeniedFolders()
+        let items: [ScanItem]
         switch section {
         // Xcode and SwiftPM caches are reported by the developer section.
-        case .caches: scanChildren(of: home.appending(path: "Library/Caches"), category: .cache,
-                                   excluding: ["com.apple.dt.Xcode", "org.swift.swiftpm"])
-        case .logs: scanChildren(of: home.appending(path: "Library/Logs"), category: .logs, excluding: ["DiagnosticReports"])
-        case .trash: scanChildren(of: home.appending(path: ".Trash"), category: .trash)
-        case .developer: scanDeveloperFiles(in: home)
+        case .caches: items = scanChildren(of: home.appending(path: "Library/Caches"), category: .cache,
+                                           excluding: ["com.apple.dt.Xcode", "org.swift.swiftpm"], denied: denied)
+        case .logs: items = scanChildren(of: home.appending(path: "Library/Logs"), category: .logs,
+                                         excluding: ["DiagnosticReports"], denied: denied)
+        case .trash: items = scanChildren(of: home.appending(path: ".Trash"), category: .trash, denied: denied)
+        case .developer: items = scanDeveloperFiles(in: home, denied: denied)
         // Separate from .developer: Downloads can wait on a macOS access prompt.
-        case .xcodeInstallers: scanOldXcodeDownloads(in: home.appending(path: "Downloads"))
-        case .oldFiles: scanOldFiles(in: home)
-        case .downloads: scanLargeFiles(in: home.appending(path: "Downloads"), minimumSize: largeFileMinimum)
-        case .documents: scanLargeFiles(in: home.appending(path: "Documents"), minimumSize: largeFileMinimum)
-        case .desktop: scanLargeFiles(in: home.appending(path: "Desktop"), minimumSize: largeFileMinimum)
+        case .xcodeInstallers: items = scanOldXcodeDownloads(in: home.appending(path: "Downloads"), denied: denied)
+        case .oldFiles: items = scanOldFiles(in: home, denied: denied)
+        case .downloads: items = scanLargeFiles(in: home.appending(path: "Downloads"), minimumSize: largeFileMinimum, denied: denied)
+        case .documents: items = scanLargeFiles(in: home.appending(path: "Documents"), minimumSize: largeFileMinimum, denied: denied)
+        case .desktop: items = scanLargeFiles(in: home.appending(path: "Desktop"), minimumSize: largeFileMinimum, denied: denied)
         }
+        return ScanReport(items: items, deniedPaths: denied.paths)
     }
 
     static func sorted(_ items: [ScanItem]) -> [ScanItem] {
@@ -65,12 +74,9 @@ struct DiskScanner: Sendable {
         }
     }
 
-    private func scanChildren(of root: URL, category: ScanCategory, excluding excludedNames: Set<String> = []) -> [ScanItem] {
-        guard let children = try? fileManager.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isSymbolicLinkKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
+    private func scanChildren(of root: URL, category: ScanCategory, excluding excludedNames: Set<String> = [],
+                              denied: DeniedFolders) -> [ScanItem] {
+        guard let children = denied.contents(of: root, keys: [.isSymbolicLinkKey, .contentModificationDateKey]) else { return [] }
 
         return children.compactMap { url -> ScanItem? in
             guard !excludedNames.contains(url.lastPathComponent), !isSymbolicLink(url) else { return nil }
@@ -95,53 +101,54 @@ struct DiskScanner: Sendable {
         return item
     }
 
-    private func scanDeveloperFiles(in home: URL) -> [ScanItem] {
+    private func scanDeveloperFiles(in home: URL, denied: DeniedFolders) -> [ScanItem] {
         let developer = home.appending(path: "Library/Developer")
         var items: [ScanItem] = []
 
         items += scanAgedChildren(
             of: developer.appending(path: "Xcode/DerivedData"),
             category: .derivedData,
-            olderThanDays: 30
+            olderThanDays: 30,
+            denied: denied
         )
         items += scanAgedChildren(
             of: developer.appending(path: "Xcode/Archives"),
             category: .xcodeArchive,
-            olderThanDays: 180
+            olderThanDays: 180,
+            denied: denied
         )
 
         for platform in ["iOS", "watchOS", "tvOS"] {
             items += scanAgedChildren(
                 of: developer.appending(path: "Xcode/\(platform) DeviceSupport"),
                 category: .deviceSupport,
-                olderThanDays: 180
+                olderThanDays: 180,
+                denied: denied
             )
         }
 
         items += scanChildren(
             of: developer.appending(path: "CoreSimulator/Caches"),
-            category: .simulatorCache
+            category: .simulatorCache,
+            denied: denied
         )
         items += scanChildren(
             of: home.appending(path: "Library/Caches/com.apple.dt.Xcode"),
-            category: .xcodeCache
+            category: .xcodeCache,
+            denied: denied
         )
         items += scanChildren(
             of: home.appending(path: "Library/Caches/org.swift.swiftpm"),
-            category: .xcodeCache
+            category: .xcodeCache,
+            denied: denied
         )
-        items += scanOldXcodeCopies()
+        items += scanOldXcodeCopies(denied: denied)
 
         return items
     }
 
-    private func scanOldXcodeCopies() -> [ScanItem] {
-        let applications = applicationsRoot
-        guard let urls = try? fileManager.contentsOfDirectory(
-            at: applications,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
+    private func scanOldXcodeCopies(denied: DeniedFolders) -> [ScanItem] {
+        guard let urls = denied.contents(of: applicationsRoot, keys: [.contentModificationDateKey]) else { return [] }
 
         let copies: [(url: URL, version: String)] = urls.compactMap { url in
             // Match bundle identity, not the name: tools such as Xcodes.app are not Xcode copies.
@@ -169,10 +176,14 @@ struct DiskScanner: Sendable {
         }
     }
 
-    private func scanOldXcodeDownloads(in downloads: URL) -> [ScanItem] {
+    private func scanOldXcodeDownloads(in downloads: URL, denied: DeniedFolders) -> [ScanItem] {
         // Filter names before requesting resource metadata. Prefetching allocated sizes for
         // every unrelated download can block in Foundation on special/provider-backed files.
-        guard let names = try? fileManager.contentsOfDirectory(atPath: downloads.path) else { return [] }
+        let names: [String]
+        do { names = try fileManager.contentsOfDirectory(atPath: downloads.path) } catch {
+            denied.note(downloads, error)
+            return []
+        }
         let urls = names.filter { !$0.hasPrefix(".") }.map { downloads.appending(path: $0) }
         let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? .distantPast
 
@@ -194,24 +205,21 @@ struct DiskScanner: Sendable {
         }
     }
 
-    private func scanOldFiles(in home: URL) -> [ScanItem] {
+    private func scanOldFiles(in home: URL, denied: DeniedFolders) -> [ScanItem] {
         var items = scanAgedChildren(
             of: home.appending(path: "Library/Logs/DiagnosticReports"),
             category: .diagnostics,
-            olderThanDays: 30
+            olderThanDays: 30,
+            denied: denied
         )
         items += scanAgedChildren(
             of: home.appending(path: "Library/Application Support/MobileSync/Backup"),
             category: .deviceBackup,
-            olderThanDays: 180
+            olderThanDays: 180,
+            denied: denied
         )
 
-        let applications = applicationsRoot
-        if let appURLs = try? fileManager.contentsOfDirectory(
-            at: applications,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) {
+        if let appURLs = denied.contents(of: applicationsRoot, keys: [.contentModificationDateKey]) {
             items += appURLs.compactMap { url in
                 guard url.pathExtension.lowercased() == "app",
                       url.lastPathComponent.localizedCaseInsensitiveContains("Install macOS") else { return nil }
@@ -233,13 +241,10 @@ struct DiskScanner: Sendable {
     private func scanAgedChildren(
         of root: URL,
         category: ScanCategory,
-        olderThanDays: Int
+        olderThanDays: Int,
+        denied: DeniedFolders
     ) -> [ScanItem] {
-        guard let children = try? fileManager.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isSymbolicLinkKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
+        guard let children = denied.contents(of: root, keys: [.isSymbolicLinkKey, .contentModificationDateKey]) else { return [] }
 
         let cutoff = Calendar.current.date(byAdding: .day, value: -olderThanDays, to: Date()) ?? .distantPast
         return children.compactMap { url in
@@ -253,13 +258,9 @@ struct DiskScanner: Sendable {
 
     /// Files and packages (apps, libraries, bundles) at least `minimumSize`, hidden ones included.
     /// Hidden folders such as `.git` are not entered: their files belong to the folder and are not offered alone.
-    private func scanLargeFiles(in root: URL, minimumSize: Int64) -> [ScanItem] {
+    private func scanLargeFiles(in root: URL, minimumSize: Int64, denied: DeniedFolders) -> [ScanItem] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isHiddenKey, .isSymbolicLinkKey, .contentModificationDateKey]
-        guard let enumerator = fileManager.enumerator(
-            at: root,
-            includingPropertiesForKeys: keys,
-            options: [.skipsPackageDescendants]
-        ) else { return [] }
+        guard let enumerator = denied.enumerator(at: root, keys: keys, options: [.skipsPackageDescendants]) else { return [] }
 
         var items: [ScanItem] = []
         for case let url as URL in enumerator {

@@ -123,7 +123,8 @@ final class OptimizerModel: ObservableObject {
                 candidates = suggested
                 reviewCount = outcome.items.filter { !OptimizePolicy.categories.contains($0.category) && $0.category != .trash }.count
                 recommendationWarning = outcome.warning
-                phase = outcome.incomplete.isEmpty ? "Review your optimization plan" : "Review your optimization plan · some locations were not read"
+                phase = outcome.incomplete.isEmpty && outcome.denied.isEmpty
+                    ? "Review your optimization plan" : "Review your optimization plan · some locations were not read"
             case .failure(let failure):
                 recommendationWarning = failure.message
                 recommendationsUnavailable = true

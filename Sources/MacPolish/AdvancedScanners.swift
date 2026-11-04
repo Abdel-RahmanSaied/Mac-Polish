@@ -3,10 +3,12 @@ import Foundation
 
 struct ApplicationScanner: Sendable {
     private var fileManager: FileManager { .default }
+    /// Folders to list; nil means /Applications, /System/Applications and ~/Applications.
+    var roots: [URL]? = nil
 
     func scan() -> [ApplicationItem] {
         let home = fileManager.homeDirectoryForCurrentUser
-        let roots = [
+        let roots = self.roots ?? [
             URL(fileURLWithPath: "/Applications", isDirectory: true),
             URL(fileURLWithPath: "/System/Applications", isDirectory: true),
             home.appending(path: "Applications", directoryHint: .isDirectory)
@@ -36,6 +38,7 @@ struct ApplicationScanner: Sendable {
                     ?? (bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
                 let leftovers = Self.leftovers(appName: name, bundleIdentifier: bundleID,
                                                library: fileManager.homeDirectoryForCurrentUser.appending(path: "Library"))
+                let isProtected = path.hasPrefix("/System/Applications/") || bundleID == "com.asaied.macpolish"
 
                 results.append(ApplicationItem(
                     id: UUID(),
@@ -46,8 +49,12 @@ struct ApplicationScanner: Sendable {
                     size: allocatedSize(of: url),
                     leftoverURLs: leftovers,
                     leftoverSize: leftovers.reduce(0) { $0 + allocatedSize(of: $1) },
-                    canRemove: !path.hasPrefix("/System/Applications/") && bundleID != "com.asaied.macpolish",
-                    isSelected: false
+                    canRemove: !isProtected,
+                    isSelected: false,
+                    // Shown before selection: Finder can remove it with an administrator password; Mac Polish cannot.
+                    removalNote: isProtected ? nil : TrashValidation.preflight(url).flatMap {
+                        [.ownership, .readOnly, .locked].contains($0.kind) ? $0.detail : nil
+                    }
                 ))
             }
         }
@@ -96,19 +103,22 @@ struct DuplicateScanner: Sendable {
     private var fileManager: FileManager { .default }
 
     func scan(minimumSize: Int64 = 1_024 * 1_024, roots customRoots: [URL]? = nil) -> [DuplicateFile] {
+        report(minimumSize: minimumSize, roots: customRoots).items
+    }
+
+    /// Duplicates in the readable folders, and the folders macOS would not let the scan open.
+    func report(minimumSize: Int64 = 1_024 * 1_024, roots customRoots: [URL]? = nil) -> ScanReport<DuplicateFile> {
         let home = fileManager.homeDirectoryForCurrentUser
         let roots = customRoots ?? ["Downloads", "Documents", "Desktop", "Pictures"].map {
             home.appending(path: $0, directoryHint: .isDirectory)
         }
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
+        let denied = DeniedFolders()
         var bySize: [Int64: [URL]] = [:]
 
         for root in roots {
-            guard let enumerator = fileManager.enumerator(
-                at: root,
-                includingPropertiesForKeys: Array(keys),
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            ) else { continue }
+            guard let enumerator = denied.enumerator(at: root, keys: Array(keys),
+                                                     options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
 
             for case let url as URL in enumerator {
                 if TrashValidation.isManagedDependency(url) {
@@ -147,11 +157,12 @@ struct DuplicateScanner: Sendable {
             }
         }
 
-        return results.sorted {
+        let sorted = results.sorted {
             if $0.fingerprint == $1.fingerprint { return $0.url.path < $1.url.path }
             if $0.size == $1.size { return $0.fingerprint < $1.fingerprint }
             return $0.size > $1.size
         }
+        return ScanReport(items: sorted, deniedPaths: denied.paths)
     }
 
     private func fingerprint(of url: URL) -> String? {
@@ -199,6 +210,8 @@ struct StartupScanner: Sendable {
 
 struct ApplicationUninstaller: Sendable {
     private var fileManager: FileManager { .default }
+    /// Folders apps may be removed from; nil means /Applications and ~/Applications.
+    var applicationRoots: [URL]? = nil
 
     func remove(_ applications: [ApplicationItem]) -> ApplicationRemovalResult {
         var removedIDs: Set<UUID> = []
@@ -252,10 +265,12 @@ struct ApplicationUninstaller: Sendable {
 
     private func isAllowedApplication(_ url: URL) -> Bool {
         let path = url.standardizedFileURL.path
-        let homeApplications = fileManager.homeDirectoryForCurrentUser.appending(path: "Applications").standardizedFileURL.path
+        let roots = (applicationRoots ?? [URL(fileURLWithPath: "/Applications"),
+                                          fileManager.homeDirectoryForCurrentUser.appending(path: "Applications")])
+            .map { $0.standardizedFileURL.path }
         return TrashValidation.isUnredirected(url)
             && url.pathExtension.lowercased() == "app"
-            && (path.hasPrefix("/Applications/") || path.hasPrefix(homeApplications + "/"))
+            && roots.contains { path.hasPrefix($0 + "/") }
             && !path.hasPrefix("/System/")
     }
 

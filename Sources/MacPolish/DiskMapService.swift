@@ -38,7 +38,8 @@ enum DiskMapService {
         return ["--root", root, "--options", String(decoding: try encoder.encode(options), as: UTF8.self)]
     }
 
-    /// Folders where reading can trigger a macOS privacy prompt (or a cloud provider) and stall.
+    /// Folders macOS protects or a cloud provider serves. Desktop, Documents and Downloads can wait on a prompt;
+    /// since macOS 27, other apps' containers are refused without one unless Full Disk Access is on.
     static func protectedFolders(home: URL) -> [URL] {
         ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music",
          "Library/Mobile Documents", "Library/CloudStorage", "Library/Containers", "Library/Group Containers"]

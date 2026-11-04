@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     @Published var applicationState: ModuleState = .idle
     @Published var duplicateFiles: [DuplicateFile] = []
     @Published var duplicateState: ModuleState = .idle
+    /// Set when macOS denied some personal folders; the duplicates found elsewhere are still shown.
+    @Published var duplicateWarning: String?
     @Published var diskMap: DiskMapReport?
     @Published var storageState: ModuleState = .idle
     @Published var storageStarted: Date?
@@ -225,14 +227,16 @@ final class AppModel: ObservableObject {
         guard force || duplicateFiles.isEmpty else { return }
         guard duplicateState != .loading else { return }
         duplicateState = .loading
+        duplicateWarning = nil
 
         Task {
             let result = await BackgroundWork.run(qos: .userInitiated) {
-                DiskScanService.read(DuplicateFile.self, mode: "duplicates")
+                DiskScanService.readValue(ScanReport<DuplicateFile>.self, mode: "duplicates")
             }
             switch result {
-            case .success(let results):
-                duplicateFiles = results
+            case .success(let report):
+                duplicateFiles = report.items
+                duplicateWarning = AccessWarning.denied(report.deniedPaths, purpose: "checked for duplicates")
                 duplicateState = .ready
             case .failure(let failure):
                 duplicateState = .failed(failure.message)
@@ -279,7 +283,8 @@ final class AppModel: ObservableObject {
     }
 
     func setApplicationSelection(_ selected: Bool, id: UUID) {
-        guard let index = applications.firstIndex(where: { $0.id == id }), applications[index].canRemove else { return }
+        guard let index = applications.firstIndex(where: { $0.id == id }), applications[index].canRemove,
+              applications[index].removalNote == nil else { return }
         applications[index].isSelected = selected
     }
 

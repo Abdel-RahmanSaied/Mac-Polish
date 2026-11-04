@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="${0:A:h:h}"
-OUTPUT_DIR="$PROJECT_ROOT/dist"
+OUTPUT_DIR="${MACPOLISH_OUTPUT_DIR:-$PROJECT_ROOT/dist}"
 APP_BUNDLE="$OUTPUT_DIR/Mac Polish.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -20,6 +20,7 @@ cp "$PROJECT_ROOT/Resources/AppIcon.icns" "$CONTENTS_DIR/Resources/AppIcon.icns"
 ICON_FILE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$CONTENTS_DIR/Info.plist")"
 [[ -s "$CONTENTS_DIR/Resources/$ICON_FILE" ]] || { print -u2 "Application icon resource is missing: $ICON_FILE"; exit 1; }
 
-codesign --force --sign - "$APP_BUNDLE" >/dev/null
+# Hardened runtime and a stable identity when available (see Scripts/sign-app.sh).
+"$PROJECT_ROOT/Scripts/sign-app.sh" "$APP_BUNDLE"
 
 print "Built: $APP_BUNDLE"

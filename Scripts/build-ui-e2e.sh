@@ -16,5 +16,6 @@ swiftc -parse-as-library "${SOURCES[@]}" Tests/UIE2EApp.swift -o "$APP/Contents/
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable UIE2E' "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleName Mac Polish E2E' "$APP/Contents/Info.plist"
 /usr/bin/ditto Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-codesign --force --sign - "$APP"
+# The isolated fixture signs ad hoc unless an identity is given, with the same hardened runtime as the app.
+MACPOLISH_SIGN_IDENTITY="${MACPOLISH_SIGN_IDENTITY:--}" Scripts/sign-app.sh "$APP"
 print "Built isolated UI fixture app: $APP"
