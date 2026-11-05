@@ -25,7 +25,7 @@ enum ScanWorker {
                 } else {
                     try write(DiskScanner().scan(includeLargeFiles: arguments.contains("--include-large-files")))
                 }
-            case "duplicates": try write(DuplicateScanner().report())
+            case "duplicates": try write(DuplicateScanner().report(deadline: Date().addingTimeInterval(50)))
             case "applications": try write(ApplicationScanner().scan())
             case "tree":
                 guard let request = treeRequest(arguments) else { return 2 }

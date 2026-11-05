@@ -10,7 +10,7 @@ typeset -a CHECKS=(DuplicateSelectionCheck UpdateCheck AccessSetupCheck Optimize
                    DuplicateSafetyCheck StorageMeasurementCheck ScannerRegressionCheck CleanupPolicyCheck
                    CleanupConfirmationCheck ScanWorkerGuardCheck BackgroundWorkCheck PartialScanCheck HardeningCheck
                    DiskTreeCheck VolumeUsageCheck DiskMapCheck ScanDenialCheck AccessPromptOrderCheck
-                   RemovalRightsCheck FullDiskAccessCheck AppCopiesCheck)
+                   RemovalRightsCheck FullDiskAccessCheck AppCopiesCheck EngineEvaluationCheck)
 # Shell checks run after the Swift checks: real installer and signing tools on fixtures.
 typeset -a SCRIPT_CHECKS=(InstallerCheck)
 RUN_E2E=false

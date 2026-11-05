@@ -17,18 +17,27 @@ enum AccessSetupCheck {
         let nested = NSError(domain: "Fixture", code: 1, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT))])
         precondition(FolderAccessCheck.classify(nested) == .missing)
         let locations = FolderAccessCheck.locations(home: root)
-        precondition(locations.count == 6 && Set(locations.map { $0.1.path }).count == 6)
+        precondition(locations.count == 16 && Set(locations.map { $0.1.path }).count == 16)
         precondition(locations.allSatisfy { $0.1.path.hasPrefix(root.path + "/") })
         let suite = "MacPolish-access-test-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let access = AccessSetupModel(defaults: defaults)
         precondition(access.presented && access.results.isEmpty && !access.checking)
+        precondition(access.step == .welcome && access.hasIncompleteAccess)
+        access.step = .folders
+        let resumed = AccessSetupModel(defaults: defaults)
+        precondition(resumed.presented && resumed.step == .folders, "Resume setup after macOS requests a restart")
+        access.fullDiskAccess = .accessible
+        access.results = [FolderAccessResult(name: "fixture", url: root, status: .timedOut)]
+        precondition(access.hasIncompleteAccess, "Timeouts are not ready access")
+        access.results = [FolderAccessResult(name: "fixture", url: root, status: .readable)]
+        precondition(!access.hasIncompleteAccess)
         access.settingsPresented = true
         access.finish()
         precondition(!access.presented && !access.settingsPresented)
         let returning = AccessSetupModel(defaults: defaults)
-        precondition(!returning.presented && returning.results.isEmpty && returning.checkedAt == nil)
+        precondition(!returning.presented && returning.step == .welcome && returning.results.isEmpty && returning.checkedAt == nil)
         print("PASS: readable/missing/restricted/unknown access, isolated paths, first-run and skipped setup persistence")
     }
 }

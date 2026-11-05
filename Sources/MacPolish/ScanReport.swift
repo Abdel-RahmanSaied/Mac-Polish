@@ -5,6 +5,17 @@ import Foundation
 struct ScanReport<Item: Codable & Sendable>: Codable, Sendable {
     var items: [Item]
     var deniedPaths: [String]
+    /// A cooperative deadline preserves verified results instead of discarding the entire scan.
+    var incomplete: Bool = false
+
+    func warning(purpose: String) -> String? {
+        var parts: [String] = []
+        if let access = AccessWarning.denied(deniedPaths, purpose: purpose) { parts.append(access) }
+        if incomplete {
+            parts.append("The scan reached its time limit. Verified results are shown, but some files have not been checked.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
 }
 
 /// Collects folders a scan needed but could not open. Missing folders are normal and not recorded.

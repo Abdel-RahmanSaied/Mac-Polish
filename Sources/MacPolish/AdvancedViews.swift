@@ -175,7 +175,7 @@ struct DuplicatesView: View {
                             HStack {
                                 Text("\(group.files.count) identical files")
                                 Spacer()
-                                Text("Up to \(group.reclaimableSize.formattedBytes) reclaimable")
+                                Text("\(group.reclaimableSize.formattedBytes) estimated on disk")
                                 Button("Select extras") { selectExtras(in: group) }
                                     .buttonStyle(.borderless)
                             }
@@ -218,7 +218,7 @@ struct DuplicatesView: View {
             Button("Cancel", role: .cancel) {}
             Button("Move to Trash", role: .destructive) { model.removeSelectedDuplicates() }
         } message: {
-            Text("\(model.duplicateFiles.filter(\.isSelected).count) selected files (\(model.selectedDuplicateSize.formattedBytes)) will be moved to Trash. At least one copy per group is kept. Remove All keeps the first path alphabetically; cancel to review or change the selection.")
+            Text("\(model.duplicateFiles.filter(\.isSelected).count) selected files (\(model.selectedDuplicateSize.formattedBytes)) will be moved to Trash. Disk space is estimated; shared blocks and Trash can delay space recovery. At least one copy per group is kept. Remove All keeps the first path alphabetically; cancel to review or change the selection.")
         }
     }
 
@@ -238,16 +238,35 @@ struct DuplicatesView: View {
 struct StorageMapView: View {
     @EnvironmentObject private var model: AppModel
     @State private var path: [String] = []
+    @State private var inspection: FolderInspectionTarget?
 
     var body: some View {
         VStack(spacing: 0) {
             moduleHeader(
                 title: "Storage Map",
-                subtitle: "Everything on your startup disk, measured the way APFS stores it.",
+                subtitle: "Accessible files on your startup Data volume, including hidden files and app contents.",
                 buttonTitle: model.storageState == .loading ? "Analyzing…" : "Analyze Again",
                 isBusy: model.storageState == .loading,
                 action: { path = []; model.analyzeStorage(force: true) }
             )
+            HStack {
+                Button("Choose Disk or Folder…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true
+                    panel.canChooseFiles = false
+                    panel.allowsMultipleSelection = false
+                    panel.prompt = "Inspect"
+                    panel.message = "Choose a mounted disk or folder to inspect. This only reads files."
+                    if panel.runModal() == .OK, let url = panel.url {
+                        inspection = FolderInspectionTarget(url: url.resolvingSymlinksInPath())
+                    }
+                }
+                Button("Review Scan Permissions…") {
+                    model.access.step = .diskAccess
+                    model.access.presented = true
+                }
+                Spacer()
+            }.padding(.horizontal, 30).padding(.bottom, 12)
             if model.storageState == .loading, model.diskMap != nil, let started = model.storageStarted {
                 ScanElapsedView(started: started).padding(.bottom, 8)
             }
@@ -278,6 +297,7 @@ struct StorageMapView: View {
             }
         }
         .task { model.analyzeStorage() }
+        .sheet(item: $inspection) { FolderInspectionView(start: $0.url) }
     }
 }
 
@@ -406,6 +426,7 @@ private struct DiskSummaryCard: View {
 private struct DiskBrowser: View {
     let root: DiskNode
     @Binding var path: [String]
+    @State private var inspection: FolderInspectionTarget?
 
     private var current: DiskNode {
         path.reduce(root) { node, name in node.children.first { $0.name == name && $0.kind == .folder } ?? node }
@@ -429,6 +450,9 @@ private struct DiskBrowser: View {
                 if !path.isEmpty {
                     Button("Back") { path.removeLast() }
                 }
+                Button("Inspect every item…") {
+                    inspection = FolderInspectionTarget(url: DiskMapService.revealURL(path))
+                }
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([DiskMapService.revealURL(path)]) }
             }
             if folder.children.isEmpty {
@@ -443,6 +467,7 @@ private struct DiskBrowser: View {
         }
         .padding(20)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .sheet(item: $inspection) { FolderInspectionView(start: $0.url) }
     }
 }
 
@@ -608,6 +633,95 @@ private struct ScanFailureView: View {
             ContentUnavailableView("Scan incomplete", systemImage: "exclamationmark.triangle", description: Text(message))
             Button("Review Scan Permissions…") { model.access.presented = true }
                 .buttonStyle(.borderedProminent).padding(.bottom, 24)
+        }
+    }
+}
+
+
+private struct FolderInspectionTarget: Identifiable {
+    let url: URL
+    var id: String { url.path }
+}
+
+/// Lists every direct entry, including tiny and empty files, without retaining millions of nested rows.
+private struct FolderInspectionView: View {
+    let start: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var current: URL?
+    @State private var result: DiskTreeResult?
+    @State private var failure: String?
+    @State private var loading = false
+    @State private var visibleCount = 200
+    @State private var requestID = UUID()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Label("Folder details", systemImage: "folder.badge.magnifyingglass").font(.title2.bold())
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+            Text((current ?? start).path).font(.caption).textSelection(.enabled)
+            HStack {
+                Button("Up one folder") { load((current ?? start).deletingLastPathComponent()) }
+                    .disabled(loading || (current ?? start).path == "/")
+                Button("Refresh") { load(current ?? start) }.disabled(loading)
+                Spacer()
+                if loading { ProgressView().controlSize(.small); Text("Measuring…").font(.caption) }
+            }
+            Text("Includes hidden, small and empty entries. Folder sizes include descendants on this volume; symbolic links and other mounted volumes are not followed. Shared space is estimated.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let failure { Label(failure, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+            if let result {
+                Text("\(result.root.bytes.formattedBytes) · \(result.root.files.formatted()) files in this tree").font(.headline)
+                if result.incomplete || result.root.unreadable > 0 || result.missing {
+                    Text("Incomplete coverage: \(result.root.unreadable) unreadable, \(result.root.notScanned) not scanned. Some locations may be missing or unavailable.")
+                        .font(.callout).foregroundStyle(.orange)
+                }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(result.root.children.prefix(visibleCount).enumerated()), id: \.offset) { _, child in
+                            DiskRow(node: child, parentBytes: result.root.bytes,
+                                    open: { load((current ?? start).appendingPathComponent(child.name)) },
+                                    reveal: { NSWorkspace.shared.activateFileViewerSelecting([(current ?? start).appendingPathComponent(child.name)]) })
+                                .disabled(loading)
+                        }
+                        if result.root.children.count > visibleCount {
+                            Button("Show next 200 items (\(result.root.children.count - visibleCount) remaining)") { visibleCount += 200 }
+                        }
+                        if result.root.children.isEmpty && !loading {
+                            Text(result.root.unreadable > 0 || result.missing ? "This location could not be read." : "No readable entries found.")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(result.unreadablePaths, id: \.self) { path in
+                            Text("Could not read: " + path).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                        }
+                    }
+                }
+            } else { Spacer() }
+        }.padding(24).frame(width: 760, height: 600)
+            .task { if current == nil { load(start) } }
+            .onDisappear { requestID = UUID() }
+    }
+
+    private func load(_ url: URL) {
+        let token = UUID()
+        requestID = token
+        current = url
+        result = nil
+        failure = nil
+        visibleCount = 200
+        loading = true
+        Task {
+            let answer = await BackgroundWork.run(qos: .userInitiated) {
+                DiskMapService.workerReader(url.path, DiskTreeOptions.detail, 180)
+            }
+            guard token == requestID else { return }
+            switch answer {
+            case .success(let found): result = found
+            case .failure(let error): failure = error.message
+            }
+            loading = false
         }
     }
 }

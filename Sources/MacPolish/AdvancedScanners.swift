@@ -107,7 +107,9 @@ struct DuplicateScanner: Sendable {
     }
 
     /// Duplicates in the readable folders, and the folders macOS would not let the scan open.
-    func report(minimumSize: Int64 = 1_024 * 1_024, roots customRoots: [URL]? = nil) -> ScanReport<DuplicateFile> {
+    func report(minimumSize: Int64 = 1_024 * 1_024, roots customRoots: [URL]? = nil,
+                deadline: Date? = nil,
+                fullHash: ((URL) throws -> String)? = nil) -> ScanReport<DuplicateFile> {
         let home = fileManager.homeDirectoryForCurrentUser
         let roots = customRoots ?? ["Downloads", "Documents", "Desktop", "Pictures"].map {
             home.appending(path: $0, directoryHint: .isDirectory)
@@ -115,12 +117,16 @@ struct DuplicateScanner: Sendable {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
         let denied = DeniedFolders()
         var bySize: [Int64: [URL]] = [:]
+        var seenFiles: Set<String> = []
 
+        var incomplete = false
         for root in roots {
+            if let deadline, Date() >= deadline { incomplete = true; break }
             guard let enumerator = denied.enumerator(at: root, keys: Array(keys),
                                                      options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
 
             for case let url as URL in enumerator {
+                if let deadline, Date() >= deadline { incomplete = true; break }
                 if TrashValidation.isManagedDependency(url) {
                     enumerator.skipDescendants()
                     continue
@@ -133,29 +139,50 @@ struct DuplicateScanner: Sendable {
                 guard let length = values.fileSize else { continue }
                 let size = Int64(length)
                 guard size >= minimumSize else { continue }
+                // Overlapping roots and hard links must never create extra copies of one file.
+                var info = stat()
+                guard lstat(url.path, &info) == 0 else {
+                    denied.note(url, NSError(domain: NSPOSIXErrorDomain, code: Int(errno)))
+                    continue
+                }
+                guard seenFiles.insert("\(info.st_dev):\(info.st_ino)").inserted else { continue }
                 bySize[size, default: []].append(url)
             }
         }
 
         var results: [DuplicateFile] = []
-        for (size, urls) in bySize where urls.count > 1 {
-            var byHash: [String: [URL]] = [:]
+        // Deterministic, largest-first processing prioritizes useful results within the budget.
+        sizeGroups: for size in bySize.keys.sorted(by: >) {
+            let urls = bySize[size]!.sorted { $0.path < $1.path }
+            guard urls.count > 1 else { continue }
+            var bySample: [String: [URL]] = [:]
             for url in urls {
-                let digest: String
-                do { digest = try FileFingerprint.sha256(url) }
-                catch { denied.note(url, error); continue }
-                byHash[digest, default: []].append(url)
+                do {
+                    let sample = try FileFingerprint.sample(url, length: size, deadline: deadline)
+                    bySample[sample, default: []].append(url)
+                } catch is FileFingerprint.DeadlineReached { incomplete = true; break sizeGroups }
+                catch { denied.note(url, error) }
             }
-            for (digest, matches) in byHash where matches.count > 1 {
-                results += matches.map {
-                    DuplicateFile(
-                        id: UUID(),
-                        url: $0,
-                        size: size,
-                        fingerprint: digest,
-                        isSelected: false
-                    )
+            for sample in bySample.keys.sorted() {
+                let candidates = bySample[sample]!
+                guard candidates.count > 1 else { continue }
+                var byHash: [String: [URL]] = [:]
+                var timedOut = false
+                for url in candidates {
+                    do {
+                        try FileFingerprint.checkDeadline(deadline)
+                        let digest = try fullHash?(url) ?? FileFingerprint.sha256(url, deadline: deadline)
+                        byHash[digest, default: []].append(url)
+                    } catch is FileFingerprint.DeadlineReached { timedOut = true; break }
+                    catch { denied.note(url, error) }
                 }
+                for (digest, matches) in byHash where matches.count > 1 {
+                    results += matches.map {
+                        DuplicateFile(id: UUID(), url: $0, size: size, fingerprint: digest, isSelected: false,
+                                      diskBytes: FileAttributes.read(path: $0.path)?.attributedBytes ?? 0)
+                    }
+                }
+                if timedOut { incomplete = true; break sizeGroups }
             }
         }
 
@@ -164,7 +191,7 @@ struct DuplicateScanner: Sendable {
             if $0.size == $1.size { return $0.fingerprint < $1.fingerprint }
             return $0.size > $1.size
         }
-        return ScanReport(items: sorted, deniedPaths: denied.paths)
+        return ScanReport(items: sorted, deniedPaths: denied.paths, incomplete: incomplete)
     }
 
 

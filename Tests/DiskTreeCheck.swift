@@ -65,6 +65,16 @@ enum DiskTreeCheck {
         precondition(child("vault", of: child("tiny") ?? tree)?.kind == .unreadable, "path to a locked folder stays listed")
         precondition(result.unreadablePaths == [locked.path, nestedLocked.path].sorted())
 
+        // On-demand detail shows every direct entry, including zero-byte files and tiny folders.
+        try Data().write(to: root.appending(path: "empty.txt"))
+        let detailed = DiskTreeScanner.scan(root.path, options: .detail)
+        precondition(detailed.root.children.contains { $0.name == "empty.txt" && $0.bytes == 0 })
+        precondition(detailed.root.children.contains { $0.name == "small1.txt" })
+        precondition(detailed.root.children.contains { $0.name == ".hidden-big" })
+        precondition(!detailed.root.children.contains { $0.kind == .smallerItems })
+        precondition(detailed.root.children.allSatisfy { $0.children.isEmpty }, "Deeper rows are loaded on demand")
+        try fm.removeItem(at: root.appending(path: "empty.txt"))
+
         // The same tree with one or eight threads.
         var single = options
         single.threads = 1

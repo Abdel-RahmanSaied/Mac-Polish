@@ -81,6 +81,11 @@ enum DiskMapE2E {
         try check(report.reconciliation?.unexplained == Int64(mib / 2) && report.reconciliation?.meetsTarget == true,
                   "reconciliation names the unexplained remainder: \(String(describing: report.reconciliation))")
 
+        // Detail inspection uses the same real worker with all immediate entries retained.
+        let detail = try DiskMapService.workerReader(home.appending(path: "small").path, .detail, 60).get()
+        try check(detail.root.children.count == 300 && detail.root.children.allSatisfy { $0.kind == .file },
+                  "all 300 small files must be available for paginated detail inspection")
+
         // Worker processes and in-process scanning produce the same map.
         let inProcess = try DiskMapService.scan(home: home, dataRoot: dataRoot.path, reader: DiskMapService.inProcessReader,
                                                 volumes: { usage }).get()

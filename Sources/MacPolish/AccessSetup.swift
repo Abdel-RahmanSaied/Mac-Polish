@@ -70,7 +70,8 @@ enum FolderAccessCheck {
     /// that does not answer in time is reported on its own instead of failing the whole check.
     /// Prompting folders are checked one after another, each with the full `timeout`: started together,
     /// the prompts would queue on screen while their deadlines ran at the same time.
-    static func checkAll(timeout: TimeInterval = 90, reader: LocationReader? = nil) -> (results: [FolderAccessResult], warning: String?) {
+    static func checkAll(timeout: TimeInterval = 90, reader: LocationReader? = nil,
+                         onResult: (@Sendable (FolderAccessResult) -> Void)? = nil) -> (results: [FolderAccessResult], warning: String?) {
         let read = reader ?? { name, _ in
             DiskScanService.read(FolderAccessResult.self, mode: "access", arguments: ["--location", name], timeout: timeout)
         }
@@ -78,7 +79,21 @@ enum FolderAccessCheck {
         let prompting = locations.indices.filter { promptingLocations.contains(locations[$0].0) }
         let jobs = [prompting] + locations.indices.filter { !prompting.contains($0) }.map { [$0] }
         let answered = DiskScanService.concurrentMap(jobs) { job in
-            job.map { ($0, read(locations[$0].0, locations[$0].1)) }
+            job.map { index in
+                let location = locations[index]
+                let answer = read(location.0, location.1)
+                let result: FolderAccessResult
+                switch answer {
+                case .success(let found):
+                    result = found.first { $0.name == location.0 }
+                        ?? FolderAccessResult(name: location.0, url: location.1, status: .unavailable)
+                case .failure(let failure):
+                    result = FolderAccessResult(name: location.0, url: location.1,
+                                                status: failure.timedOut ? .timedOut : .unavailable)
+                }
+                onResult?(result)
+                return (index, answer)
+            }
         }.flatMap { $0 }
         let byIndex = Dictionary(uniqueKeysWithValues: answered)
         let answers = locations.indices.map { byIndex[$0]! }
@@ -102,7 +117,17 @@ enum FolderAccessCheck {
           ("Downloads", home.appending(path: "Downloads")),
           ("User caches", home.appending(path: "Library/Caches")),
           ("Xcode user data", home.appending(path: "Library/Developer")),
-          ("Trash", home.appending(path: ".Trash")) ]
+          ("Trash", home.appending(path: ".Trash")),
+          ("Pictures", home.appending(path: "Pictures")),
+          ("Movies", home.appending(path: "Movies")),
+          ("Music", home.appending(path: "Music")),
+          ("Application support", home.appending(path: "Library/Application Support")),
+          ("App containers", home.appending(path: "Library/Containers")),
+          ("Shared app containers", home.appending(path: "Library/Group Containers")),
+          ("Mail data", home.appending(path: "Library/Mail")),
+          ("Safari data", home.appending(path: "Library/Safari")),
+          ("iCloud files", home.appending(path: "Library/Mobile Documents")),
+          ("Cloud providers", home.appending(path: "Library/CloudStorage")) ]
     }
 }
 
@@ -221,6 +246,19 @@ enum AppCopies {
     }
 }
 
+enum OnboardingStep: Int, CaseIterable {
+    case welcome, diskAccess, folders, management, review
+    var title: String {
+        switch self {
+        case .welcome: "Meet your Mac, in detail"
+        case .diskAccess: "Unlock a broader view"
+        case .folders: "Check your folders"
+        case .management: "Prepare app removal"
+        case .review: "Your scan readiness"
+        }
+    }
+}
+
 @MainActor
 final class AccessSetupModel: ObservableObject {
     static let completedKey = "accessSetupCompletedV1"
@@ -233,6 +271,10 @@ final class AccessSetupModel: ObservableObject {
     private let defaults: UserDefaults
     private let probe: FullDiskAccessProbe
     private let copies: CopiesFinder
+    static let stepKey = "accessOnboardingStepV2"
+    @Published var step: OnboardingStep = .welcome {
+        didSet { defaults.set(step.rawValue, forKey: Self.stepKey) }
+    }
     @Published var presented: Bool
     @Published var settingsPresented = false
     @Published var checking = false
@@ -257,7 +299,8 @@ final class AccessSetupModel: ObservableObject {
         self.probe = probe ?? {
             (try? DiskScanService.readValue(FullDiskAccess.self, mode: "full-disk-access", timeout: 20).get()) ?? .unknown
         }
-        presented = !defaults.bool(forKey: Self.completedKey)
+        step = defaults.object(forKey: Self.stepKey).flatMap { ($0 as? Int).flatMap(OnboardingStep.init(rawValue:)) } ?? .welcome
+        presented = !defaults.bool(forKey: Self.completedKey) || defaults.object(forKey: Self.stepKey) != nil
     }
 
     /// Reopens setup if previously readable probes become restricted.
@@ -293,6 +336,10 @@ final class AccessSetupModel: ObservableObject {
 
     /// True when a folder check found a folder macOS refused, which Files & Folders can allow.
     var hasRestrictedFolder: Bool { results.contains { $0.status == .restricted } }
+    var hasIncompleteAccess: Bool {
+        results.isEmpty || fullDiskAccess != .accessible
+            || results.contains { $0.status != .readable && $0.status != .missing }
+    }
 
     func check() {
         guard !checking else { return }
@@ -301,8 +348,18 @@ final class AccessSetupModel: ObservableObject {
         checkWarning = nil
         let probe = probe
         let copies = copies
-        Task {
-            async let measured = BackgroundWork.run(qos: .utility) { FolderAccessCheck.checkAll() }
+        Task { [self] in
+            async let measured = BackgroundWork.run(qos: .utility) {
+                FolderAccessCheck.checkAll(onResult: { [weak self] result in
+                    Task { @MainActor in
+                        guard let self, self.checking else { return }
+                        self.results.removeAll { $0.id == result.id }
+                        self.results.append(result)
+                        let order = FolderAccessCheck.locations().map(\.0)
+                        self.results.sort { (order.firstIndex(of: $0.name) ?? 0) < (order.firstIndex(of: $1.name) ?? 0) }
+                    }
+                })
+            }
             async let status = BackgroundWork.run(qos: .utility) { probe() }
             async let found = BackgroundWork.run(qos: .utility) { copies() }
             let folders = await measured
@@ -317,6 +374,7 @@ final class AccessSetupModel: ObservableObject {
 
     func finish() {
         defaults.set(true, forKey: Self.completedKey)
+        defaults.removeObject(forKey: Self.stepKey)
         // Continuing without Full Disk Access is the user's choice; do not reopen setup for it at every launch.
         if fullDiskAccess == .restricted { defaults.removeObject(forKey: Self.fullDiskAccessSeenKey) }
         defaults.set(Self.copiesKey(conflictingCopies), forKey: Self.dismissedCopiesKey)
@@ -327,6 +385,7 @@ final class AccessSetupModel: ObservableObject {
     }
 
     func showSettings() {
+        step = .welcome
         cleanupContext = []
         settingsPresented = true
     }
@@ -344,10 +403,24 @@ struct AccessSetupView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Label("Prepare your scan", systemImage: "lock.shield").font(.system(size: 28, weight: .bold, design: .rounded))
-            Text("Set up file access once, before scanning.").foregroundStyle(.secondary)
+            HStack {
+                Label("MAC POLISH · SETUP", systemImage: "sparkles").font(.caption.weight(.semibold)).foregroundStyle(.cyan)
+                Spacer()
+                Text("Step \(access.step.rawValue + 1) of \(OnboardingStep.allCases.count)").font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 6) {
+                ForEach(OnboardingStep.allCases, id: \.rawValue) { step in
+                    Capsule().fill(step.rawValue <= access.step.rawValue ? Color.cyan : Color.secondary.opacity(0.2)).frame(height: 4)
+                }
+            }
+            Text(access.step.title).font(.system(size: 28, weight: .bold, design: .rounded))
+            Text("Set up access once. Know exactly what your scan can see.").foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    if access.step == .welcome { welcome }
+                    if access.step == .management { management }
+                    if access.step == .review { review }
+                    if access.step == .diskAccess || access.step == .review {
                     if access.accessLost {
                         VStack(alignment: .leading, spacing: 8) {
                             Label("Access to protected locations changed", systemImage: "exclamationmark.shield").font(.headline)
@@ -396,8 +469,10 @@ struct AccessSetupView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }.padding(14).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                     }
+                    }
+                    if access.step == .diskAccess {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("1 · Enable Full Disk Access for a broader scan").font(.headline)
+                        Text("Enable Full Disk Access for a broader scan").font(.headline)
                         Text("This allows Mac Polish to read protected files, including data belonging to other apps. Choose whether to allow it in System Settings → Privacy & Security → Full Disk Access.")
                         Text("Enable Mac Polish there. If it is missing, use + to add this application. Follow any macOS request to quit and reopen it, then return here to verify access.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -419,21 +494,32 @@ struct AccessSetupView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }.padding(16).background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    if access.step == .folders {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("2 · Check folder access together").font(.headline)
-                        Text("Check Desktop, Documents, Downloads, caches, developer files and Trash. macOS may ask about individual folders; respond to its prompts to prepare them before the scan.")
+                        Text("Verify the locations used by the scanner").font(.headline)
+                        Text("Check personal folders, app data, containers, caches, developer data, cloud folders and Trash. Respond to any macOS prompts. A readable folder does not guarantee that every child can be read.")
                             .font(.callout).foregroundStyle(.secondary)
                         HStack {
                             Button(access.checkedAt == nil ? "Check & Request Folder Access" : "Recheck Folder Access") { access.check() }
                                 .buttonStyle(.borderedProminent).disabled(access.checking)
-                            if access.checking { ProgressView().controlSize(.small) }
+                            if access.checking {
+                                ProgressView().controlSize(.small)
+                                Text("\(access.results.count) / \(FolderAccessCheck.locations().count) checked").font(.caption)
+                            }
                         }
                         if let warning = access.checkWarning {
                             Text(warning).font(.caption).foregroundStyle(.orange)
                         }
                         ForEach(access.results) { result in
                             HStack {
-                                Text(result.name)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(result.name)
+                                    if result.name == "Xcode user data" {
+                                        Text("Optional ~/Library/Developer folder; not the Xcode installation")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
                                 Spacer()
                                 Label(result.status.rawValue, systemImage: result.status == .readable ? "checkmark.circle.fill" : "info.circle")
                                     .foregroundStyle(result.status == .readable ? Color.green : Color.secondary)
@@ -453,6 +539,7 @@ struct AccessSetupView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                    }
                     Text("Checks verify directory reading at the tested locations, not the Full Disk Access setting or permission to delete every file. Other protected areas may still be unavailable. You can continue with a limited scan and revisit this setup in Settings.")
                         .font(.caption).foregroundStyle(.secondary)
                     Label("Memory monitoring works without additional permissions.", systemImage: "memorychip")
@@ -463,11 +550,70 @@ struct AccessSetupView: View {
             HStack {
                 Text("You control access in macOS.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Continue to Mac Polish") { access.finish() }
-                    .buttonStyle(.borderedProminent).disabled(access.checking)
+                if access.step != .welcome {
+                    Button("Back") { access.step = OnboardingStep(rawValue: access.step.rawValue - 1) ?? .welcome }
+                        .disabled(access.checking)
+                }
+                if access.step == .review {
+                    Button(access.hasIncompleteAccess ? "Continue with limited access" : "Open Mac Polish") { access.finish() }
+                        .buttonStyle(.borderedProminent).disabled(access.checking)
+                } else {
+                    Button("Continue") { access.step = OnboardingStep(rawValue: access.step.rawValue + 1) ?? .review }
+                        .buttonStyle(.borderedProminent).disabled(access.checking)
+                }
             }
         }.padding(28).frame(width: 650, height: 620)
             .interactiveDismissDisabled(access.checking)
+    }
+
+    private var welcome: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Image(systemName: "internaldrive.fill")
+                .font(.system(size: 64)).foregroundStyle(.cyan.gradient)
+                .frame(maxWidth: .infinity).padding(.vertical, 20)
+            Text("A complete picture starts with access.").font(.title2.bold())
+            Label("Map accessible files on your startup Data volume, including hidden files and app bundles.", systemImage: "chart.pie")
+            Label("Inspect smaller files and additional disks or folders on demand from Storage Map.", systemImage: "folder.badge.magnifyingglass")
+            Label("Review cleanup suggestions before moving anything to Trash.", systemImage: "checkmark.shield")
+            Text("macOS keeps some system files and other users’ data protected. Setup cannot bypass those restrictions. Missing or denied locations remain visible in scan results.")
+                .font(.callout).foregroundStyle(.secondary)
+        }.padding(20).background(.cyan.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var management: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Optional · only for removing applications", systemImage: "app.badge.checkmark").font(.headline)
+            Text("App Management lets macOS allow changes to other apps. It is not required to measure disk usage. If Mac Polish appears in this Settings pane, enable it when you want to use the uninstaller.")
+            Button("Open App Management") { PrivacyPane.appManagement.open() }.buttonStyle(.borderedProminent)
+            Text("macOS may request this permission when an app removal is attempted. There is no reliable read-only check for every removal. We never delete an app just to trigger a prompt.")
+                .font(.callout).foregroundStyle(.secondary)
+            Divider()
+            Label("External disks and selected folders", systemImage: "externaldrive")
+            Text("Use Choose Disk or Folder in Storage Map. Select a mounted disk or folder and respond to any macOS access request. Disconnected disks and cloud-only files cannot be fully measured locally.")
+                .font(.callout).foregroundStyle(.secondary)
+            Text("Memory monitoring needs no extra permission. Screen Recording, Accessibility and Contacts access are not needed.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(20).background(.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var review: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(access.results.isEmpty ? "Folder access has not been checked" : "\(access.results.filter { $0.status == .readable }.count) locations readable",
+                  systemImage: "checklist").font(.title3.bold())
+            if let status = access.fullDiskAccess { Text("Protected locations: " + status.label).font(.callout) }
+            ForEach(access.results.filter { $0.status != .readable }) { result in
+                HStack {
+                    Text(result.name)
+                    Spacer()
+                    Text(result.status.rawValue).foregroundStyle(.secondary)
+                }.font(.callout)
+            }
+            Text("Not present means an optional folder does not exist. Restricted, unverified or timed-out locations mean the scan may be incomplete. You can continue and fix access later in Settings.")
+                .font(.callout).foregroundStyle(.secondary)
+            Button("Review folder checks") { access.step = .folders }
+            Text("Nothing is cleaned during setup. Each scan reports its own coverage; these checks do not certify every file on the device.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(20).background(.green.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
     }
 }
 

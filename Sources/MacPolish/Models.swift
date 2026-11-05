@@ -160,6 +160,9 @@ struct DuplicateFile: Identifiable, Hashable, Sendable, Codable {
     let size: Int64
     let fingerprint: String
     var isSelected: Bool
+    /// Content length remains `size`; shared/sparse storage must not inflate the disk estimate.
+    var diskBytes: Int64? = nil
+    var estimatedDiskBytes: Int64 { diskBytes ?? size }
 }
 
 struct DuplicateGroup: Identifiable, Sendable {
@@ -167,7 +170,9 @@ struct DuplicateGroup: Identifiable, Sendable {
     let files: [DuplicateFile]
 
     var fileSize: Int64 { files.first?.size ?? 0 }
-    var reclaimableSize: Int64 { fileSize * Int64(max(0, files.count - 1)) }
+    var reclaimableSize: Int64 {
+        files.sorted { $0.url.path < $1.url.path }.dropFirst().reduce(0) { $0 + $1.estimatedDiskBytes }
+    }
 }
 
 struct StartupEntry: Identifiable, Hashable, Sendable, Codable {

@@ -88,6 +88,11 @@ struct DiskTreeOptions: Codable, Sendable, Equatable {
     /// After this moment, folders not yet read are reported as not scanned.
     var deadline: Date?
     var threads = 8
+
+    /// Keep every immediate child; recursively measure sizes without retaining deeper display rows.
+    static var detail: DiskTreeOptions {
+        DiskTreeOptions(minimumListedBytes: 0, maximumChildren: Int.max, keepDepth: 1)
+    }
 }
 
 struct DiskTreeResult: Codable, Sendable, Equatable {
@@ -266,7 +271,7 @@ enum DiskTreeScanner {
                     small.add(entry)
                 }
             }
-            if small.bytes > 0 || small.files > 0 { kept.append(small) }
+            if small.bytes > 0 || small.files > 0 || small.unreadable > 0 || small.notScanned > 0 { kept.append(small) }
             node.children = kept
             return node
         }

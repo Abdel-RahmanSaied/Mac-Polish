@@ -126,7 +126,7 @@ final class AppModel: ObservableObject {
     }
 
     var selectedDuplicateSize: Int64 {
-        duplicateFiles.filter(\.isSelected).reduce(0) { $0 + $1.size }
+        duplicateFiles.filter(\.isSelected).reduce(0) { $0 + $1.estimatedDiskBytes }
     }
 
     var selectedApplicationsSize: Int64 {
@@ -236,7 +236,7 @@ final class AppModel: ObservableObject {
             switch result {
             case .success(let report):
                 duplicateFiles = report.items
-                duplicateWarning = AccessWarning.denied(report.deniedPaths, purpose: "checked for duplicates")
+                duplicateWarning = report.warning(purpose: "checked for duplicates")
                 duplicateState = .ready
             case .failure(let failure):
                 duplicateState = .failed(failure.message)

@@ -76,7 +76,7 @@ struct DiskScanner: Sendable {
 
     private func scanChildren(of root: URL, category: ScanCategory, excluding excludedNames: Set<String> = [],
                               denied: DeniedFolders) -> [ScanItem] {
-        guard let children = denied.contents(of: root, keys: [.isSymbolicLinkKey, .contentModificationDateKey]) else { return [] }
+        guard let children = denied.contents(of: root, keys: [.isSymbolicLinkKey, .contentModificationDateKey], options: []) else { return [] }
 
         return children.compactMap { url -> ScanItem? in
             guard !excludedNames.contains(url.lastPathComponent), !isSymbolicLink(url) else { return nil }
@@ -165,16 +165,8 @@ struct DiskScanner: Sendable {
             lhs.version.compare(rhs.version, options: .numeric) == .orderedDescending
         }
         return sorted.dropFirst().compactMap { copy in
-            let size = allocatedSize(of: copy.url)
-            guard size > 0 else { return nil }
             let values = try? copy.url.resourceValues(forKeys: [.contentModificationDateKey])
-            return ScanItem(
-                url: copy.url,
-                size: size,
-                category: .oldXcode,
-                modifiedAt: values?.contentModificationDate,
-                isSelected: false
-            )
+            return item(url: copy.url, category: .oldXcode, modifiedAt: values?.contentModificationDate, denied: denied)
         }
     }
 
@@ -225,16 +217,8 @@ struct DiskScanner: Sendable {
             items += appURLs.compactMap { url in
                 guard url.pathExtension.lowercased() == "app",
                       url.lastPathComponent.localizedCaseInsensitiveContains("Install macOS") else { return nil }
-                let size = allocatedSize(of: url)
-                guard size > 0 else { return nil }
                 let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-                return ScanItem(
-                    url: url,
-                    size: size,
-                    category: .oldInstaller,
-                    modifiedAt: values?.contentModificationDate,
-                    isSelected: false
-                )
+                return item(url: url, category: .oldInstaller, modifiedAt: values?.contentModificationDate, denied: denied)
             }
         }
         return items
@@ -246,7 +230,7 @@ struct DiskScanner: Sendable {
         olderThanDays: Int,
         denied: DeniedFolders
     ) -> [ScanItem] {
-        guard let children = denied.contents(of: root, keys: [.isSymbolicLinkKey, .contentModificationDateKey]) else { return [] }
+        guard let children = denied.contents(of: root, keys: [.isSymbolicLinkKey, .contentModificationDateKey], options: []) else { return [] }
 
         let cutoff = Calendar.current.date(byAdding: .day, value: -olderThanDays, to: Date()) ?? .distantPast
         return children.compactMap { url in

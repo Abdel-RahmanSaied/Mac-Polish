@@ -2,7 +2,31 @@ import CryptoKit
 import Foundation
 
 enum FileFingerprint {
-    static func sha256(_ url: URL) throws -> String {
+    struct DeadlineReached: Error {}
+
+    static func checkDeadline(_ deadline: Date?) throws {
+        if let deadline, Date() >= deadline { throw DeadlineReached() }
+    }
+
+    /// A cheap rejection filter only. Matching samples still require a complete SHA-256 pass.
+    static func sample(_ url: URL, length: Int64, deadline: Date? = nil) throws -> String {
+        try checkDeadline(deadline)
+        guard TrashValidation.isUnredirected(url) else { throw CocoaError(.fileReadInvalidFileName) }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let chunk: Int64 = 64 * 1024
+        let offsets = Set([Int64(0), max(0, (length - chunk) / 2), max(0, length - chunk)]).sorted()
+        var hash = SHA256()
+        for offset in offsets {
+            try checkDeadline(deadline)
+            try handle.seek(toOffset: UInt64(offset))
+            hash.update(data: try handle.read(upToCount: Int(min(chunk, length - offset))) ?? Data())
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func sha256(_ url: URL, deadline: Date? = nil) throws -> String {
+        try checkDeadline(deadline)
         let before = try FileManager.default.attributesOfItem(atPath: url.path)
         guard before[.type] as? FileAttributeType == .typeRegular,
               TrashValidation.isUnredirected(url) else {
@@ -11,7 +35,11 @@ enum FileFingerprint {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let data = try handle.read(upToCount: 1_024 * 1_024), !data.isEmpty { hasher.update(data: data) }
+        while true {
+            try checkDeadline(deadline)
+            guard let data = try handle.read(upToCount: 1_024 * 1_024), !data.isEmpty else { break }
+            hasher.update(data: data)
+        }
         let after = try FileManager.default.attributesOfItem(atPath: url.path)
         guard before[.modificationDate] as? Date == after[.modificationDate] as? Date,
               before[.size] as? NSNumber == after[.size] as? NSNumber,
@@ -80,7 +108,7 @@ struct DuplicateCleaner: Sendable {
                         issues.append(CleanupIssue(url: file.url, kind: .changed, detail: "The duplicate changed during validation. Scan again."))
                         continue
                     }
-                    let item = ScanItem(id: file.id, url: file.url, size: file.size, category: .largeFile,
+                    let item = ScanItem(id: file.id, url: file.url, size: file.estimatedDiskBytes, category: .largeFile,
                                         modifiedAt: before[.modificationDate] as? Date)
                     let result = SafeCleaner().clean([item], trashItem: trashItem)
                     removed.formUnion(result.removedItemIDs)
