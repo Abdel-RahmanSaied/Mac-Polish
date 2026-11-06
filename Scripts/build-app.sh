@@ -9,6 +9,7 @@ CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 
 cd "$PROJECT_ROOT"
+source "$PROJECT_ROOT/Scripts/sdk.sh"
 swift build -c release --arch arm64
 BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
 

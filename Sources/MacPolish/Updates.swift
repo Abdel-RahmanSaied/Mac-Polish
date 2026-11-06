@@ -64,8 +64,12 @@ final class UpdateChecker: ObservableObject {
     }
     func check() async {
         guard !checking else { return }
-        guard let installed, let current = AppVersion(installed) else {
+        guard let installed else {
             status = "Build the .app bundle to check its installed version."
+            return
+        }
+        guard let current = AppVersion(installed) else {
+            status = "This build's version (\(installed)) is not in major.minor.patch form, so it cannot be compared with releases."
             return
         }
         checking = true

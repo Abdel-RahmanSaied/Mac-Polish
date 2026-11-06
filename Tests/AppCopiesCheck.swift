@@ -64,6 +64,9 @@ enum AppCopiesCheck {
         let first = AccessSetupModel(defaults: store, probe: { .accessible }, copies: { conflicting })
         await first.verifyOnLaunch()
         precondition(first.presented && first.conflictingCopies == conflicting, "A differently signed copy opens setup")
+        first.results = FolderAccessCheck.locations().map { FolderAccessResult(name: $0.0, url: $0.1, status: .readable) }
+        first.checkedAt = Date()
+        if first.fullDiskAccess == nil { first.fullDiskAccess = .unknown }
         first.finish()
         let again = AccessSetupModel(defaults: store, probe: { .accessible }, copies: { conflicting })
         await again.verifyOnLaunch()
@@ -75,6 +78,9 @@ enum AppCopiesCheck {
         let harmless = found.filter(\.sameSignature)
         let sameSigned = AccessSetupModel(defaults: UserDefaults(suiteName: suite + "-same")!, probe: { .accessible }, copies: { harmless })
         defer { UserDefaults().removePersistentDomain(forName: suite + "-same") }
+        sameSigned.results = FolderAccessCheck.locations().map { FolderAccessResult(name: $0.0, url: $0.1, status: .readable) }
+        sameSigned.checkedAt = Date()
+        if sameSigned.fullDiskAccess == nil { sameSigned.fullDiskAccess = .unknown }
         sameSigned.finish()
         await sameSigned.verifyOnLaunch()
         precondition(!sameSigned.presented && sameSigned.otherCopies == harmless, "Same-signature copies are listed but do not open setup")

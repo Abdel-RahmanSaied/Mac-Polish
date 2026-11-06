@@ -53,7 +53,25 @@ MACPOLISH_EXPORT_PASSWORD='كلمة مرور قوية' Scripts/create-signing-id
 | `Sources/MacPolish/AdvancedScanners.swift` | فحص التطبيقات والمكررات وعناصر التشغيل، وقياس الأحجام وأحدث تاريخ للمحتوى |
 | `Sources/MacPolish/FileAttributes.swift` | قراءة السمات بـ`getattrlistbulk`، وحصة كل مسار من البيانات المشتركة (Clones والروابط الصلبة) |
 | `Sources/MacPolish/DiskTree.swift` | قراءة شجرة المجلدات بعدة خيوط مع جمع العناصر الصغيرة والمهلة الزمنية |
-| `Sources/MacPolish/DiskMapService.swift` | خريطة قرص التشغيل: وحدة البيانات في عملية، وكل مجلد محمي في عملية مستقلة، ثم الدمج |
+| `Sources/MacPolish/DiskMapService.swift` | خريطة قرص التشغيل: وحدة البيانات في عملية، وكل مجلد محمي في عملية مستقلة، ووحدة النظام المختومة بدون مسارات firmlinks، ثم الدمج |
+| `Sources/MacPolish/DiskInsights.swift` | حقائق عن كل ملف أثناء قراءة الشجرة (النوع، العمر، المخفي، الفارغ، أكبر الملفات) يجمعها كل خيط وحده وتُدمج عند انتهائه |
+| `Sources/MacPolish/DiskInsightsView.swift` | عرض التغطية والمساحة حسب النوع والعمر وأكبر الملفات داخل Storage Map |
+| `Sources/MacPolish/HealthScanner.swift` و`HealthView.swift` | قراءات Mac Health (البطارية، الحرارة، SMART، الذاكرة، إعدادات الأمان) ومحللات نصية مستقلة قابلة للاختبار |
+| `Sources/MacPolish/ProjectArtifacts.swift` و`ProjectArtifactsView.swift` | مجلدات بناء المشاريع، والتحقق قبل نقلها إلى Trash، وكاش أدوات التطوير للقراءة فقط |
+| `Sources/MacPolish/CodeSignature.swift` | تصنيف التوقيع (Apple، App Store، Developer ID، ad-hoc، بدون توقيع) عبر Security framework |
+| `Sources/MacPolish/StartupAudit.swift` | فحص أمان Launch Agents وDaemons ومحللات `launchctl print-disabled` و`systemextensionsctl list` |
+| `Sources/MacPolish/AppIntelligence.swift` | معمارية Mach-O والتوقيع وApp Store وآخر استخدام، وبيانات التطبيقات المحذوفة مع التحقق قبل Trash |
+| `Sources/MacPolish/SecurityViews.swift` | واجهات Startup Items وLeftover App Data وشارات التطبيقات |
+| `Sources/MacPolish/ScanCancellation.swift` | إلغاء مجموعة فحص وإيقاف عملياتها، تتبع كل العمليات المساعدة لإنهائها عند الخروج، و`ScanRunTracker` لتجاهل نتائج فحص قديم |
+| `Sources/MacPolish/ScanServices.swift` | كل ما يحتاجه الفحص والتنظيف من النظام قابل للحقن في الاختبارات، و`ScanGateNotice` لشرح انتظار الصلاحيات |
+| `Sources/MacPolish/ModulePresentation.swift` و`ModuleViews.swift` | حالة واحدة لكل صفحة (لم يبدأ، جارٍ، فارغ، فشل، أُلغي، جزئي) وعرضها، وشريط إشعار الصلاحيات |
+| `Sources/MacPolish/ViewState.swift` | بديل `@State` لا يحتاج plugin الخاص بـSwiftUIMacros |
+| `Sources/MacPolish/CleanupConfirmation.swift` | نافذة تأكيد موحّدة لكل صفحات التنظيف وبناؤها لكل نوع عنصر |
+| `Sources/MacPolish/CleanupHistory.swift` | سجل التنظيف المحلي (مسارات وأحجام وأسباب فقط) وعرضه |
+| `Sources/MacPolish/ReportPrivacy.swift` | إخفاء الهوية في التقرير الآمن للخصوصية |
+| `Sources/MacPolish/HealthHistory.swift` | سجل Mac Health المحلي (حالات وأرقام فقط، 90 قراءة/90 يومًا)، الاتجاهات، والتقدير الزمني لنفاد المساحة |
+| `Sources/MacPolish/ReportPreview.swift` | معاينة تقرير Deep Scan قبل حفظه: تقرير كامل أو آمن للخصوصية |
+| `Sources/MacPolish/DeepScan.swift` | تشغيل كل الفاحصات معًا عبر نفس مداخل الصفحات، وتقرير Markdown |
 | `Sources/MacPolish/VolumeUsage.swift` | تقسيم حاوية APFS بين الوحدات، ومقارنة ما وُجد بالمساحة المستخدمة |
 | `Sources/MacPolish/CleanupPolicy.swift` | قاعدة واحدة لما يُختار تلقائيًا في Cleanup ويُقترح في Optimize |
 | `Sources/MacPolish/ScanWorker.swift` | عملية الفحص المساعدة للقراءة فقط، وترفض أي مُشغّل غير التطبيق نفسه |
@@ -80,6 +98,7 @@ MACPOLISH_EXPORT_PASSWORD='كلمة مرور قوية' Scripts/create-signing-id
 ## قواعد تنفيذ الميزات
 
 - استخدم Swift وSwiftUI بما يتوافق مع إصدار macOS الأدنى المحدد في `Package.swift`.
+- استخدم `@ViewState` بدل `@State` لحالة الـview: في SDK الخاص بـmacOS 27 أصبح `@State` macro يحتاج plugin غير موجود في Command Line Tools، و`Scripts/test.sh` يرفضه. `ViewState` يعمل بنفس الطريقة مع كل الـSDKs.
 - نفّذ العمل الثقيل خارج المسار الرئيسي للواجهة، وحدّث الحالة المرئية على MainActor.
 - استخدم `BackgroundWork.run` للعمل الذي ينتظر عمليات خارجية أو القرص، وليس `Task.detached`: مجموعة خيوط Swift concurrency محدودة بعدد الأنوية، والانتظار المعطِّل فيها يؤخر بقية المهام.
 - امنع بدء نفس العملية مرتين بالتزامن، واعرض حالة التحميل والنتيجة والأخطاء بوضوح.
@@ -170,6 +189,33 @@ open .build/UIE2E.app
 | `VolumeUsageCheck` | قراءة حاوية APFS ووحداتها، ونسبة التفسير والعد الزائد |
 | `DiskMapCheck` | دمج المجلدات المحمية في الخريطة، والمجلد الذي لم يُجب في الوقت، وفشل الوحدة الرئيسية، وطلب عملية الفحص |
 | `DiskMapE2E` (مع `--e2e`) | خريطة التخزين عبر عمليات فحص حقيقية على قرص تجريبي، ثم قراءة قرص التشغيل الحقيقي للقراءة فقط |
+| `DiskInsightsCheck` | كل ملف يُحسب مرة حسب النوع والعمر، أكبر الملفات بترتيب ثابت مهما كان عدد الخيوط، الدمج، JSON، واستبعاد firmlinks مع مقارنة حقيقية لوحدة النظام بما تبلّغ عنه APFS |
+| `HealthCheck` | محللات البطارية (BatteryData المتداخلة والقديمة)، SIP وGatekeeper وFileVault والجدار الناري وSMART، الدرجة، وقراءة حية واحدة |
+| `ProjectArtifactsCheck` | اكتشاف المجلدات بملف المشروع فقط، تخطي Library والمخفي والحزم والروابط، الحد الزمني والعمق، والتحقق قبل Trash |
+| `SecurityAuditCheck` | التوقيعات الحقيقية (Apple وad-hoc وبدون توقيع)، مخاطر Startup، محللات launchctl وsystemextensionsctl، Mach-O، مطابقة Group Containers الدقيقة، اكتشاف وتنظيف بيانات التطبيقات المحذوفة |
+| `CleanupHistoryCheck` | حفظ السجل واسترجاعه بصلاحية 0600، الملف التالف، حد 500 سجل، ربط العناصر المنقولة والمتخطاة، عدم حفظ المحتوى، وبناء التأكيدات |
+| `ReportPrivacyCheck` | التقرير الآمن لا يحتوي اسم المستخدم أو المسار الرئيسي أو أسماء المشاريع أو البريد أو الأرقام التسلسلية، مع ثبات العلامات والحفاظ على الأرقام |
+| `HealthHistoryCheck` | سجل Mac Health في مكان مؤقت فقط، صلاحية 0600، كتابة ذرية، حد 90 قراءة/90 يومًا، الملف التالف، عدم حفظ المسارات أو الأسماء |
+| `ReleaseFlowsCheck` | مسارات الإصدار الحرجة بصلاحيات وفحوص وTrash وهمية: سماح ورفض ومراجعة مفتوحة في Settings وإغلاق مبكر، منع التكرار، بدء وإلغاء وإعادة Deep Scan، نتائج مختلطة وجزئية، نتائج قديمة، التنظيف والعناصر المتغيرة، قوائم كبيرة وكل الحالات، وإيقاف العمليات المساعدة عند الإلغاء والخروج واختفاء التطبيق |
+| `ReviewFixesCheck` | خطة المكررات وتأكيدها، استعادة الاختيار، عدم إعادة الفحص للنتيجة الفارغة، استئناف الفحوص بعد التحقق، وحدود تنظيف المكررات |
+
+`Scripts/test.sh` و`Scripts/perf.sh` يضبطان `MACPOLISH_CLEANUP_HISTORY` و`MACPOLISH_HEALTH_HISTORY` على ملفات مؤقتة، لأن بعض الاختبارات تشغّل مسارات التنظيف الحقيقية على ملفات تجريبية؛ بدون ذلك كانت ستضيف سجلات إلى Cleanup History الخاص بك. إذا شغّلت اختبارًا يدويًا، اضبط المتغير بنفسك. `ReleaseFlowsCheck` يفشل إذا لم يكن مضبوطًا.
+
+### اختبارات الأداء والحمل
+
+```sh
+Scripts/perf.sh                                   # الحجم القياسي (حوالي 300 ألف ملف، دقيقة إلى دقيقتين)
+MACPOLISH_PERF_SCALE=smoke Scripts/perf.sh        # سريع، يعمل في CI مع كل push
+MACPOLISH_PERF_SCALE=heavy Scripts/perf.sh        # أكثر من مليون ملف
+MACPOLISH_PERF_REAL=1 Scripts/perf.sh             # إضافة قراءة حقيقية لقرص التشغيل (للقراءة فقط)
+Scripts/test.sh --perf                            # كل الاختبارات ثم مجموعة الأداء
+```
+
+`Tests/PerformanceLoadCheck.swift` ينشئ ملفات تجريبية بسرعة داخل مجلد مؤقت فريد ويحذفها دائمًا، حتى عند الفشل أو Ctrl-C. الصحة (عدد الملفات والأحجام بالضبط) تُفحص دائمًا؛ حدود الوقت والذاكرة قابلة للتعديل بمتغيرات البيئة المذكورة في رأس `Scripts/perf.sh`، و`MACPOLISH_PERF_BUDGETS=warn` يحولها لتحذيرات على أجهزة CI المشتركة. النتائج تُحفظ في `.build/perf/perf-<التاريخ>.json` للمقارنة بين التشغيلات.
+
+السيناريوهات: شجرة كبيرة، توزيع الخيوط، مجلد واسع جدًا، تداخل 400 مستوى، Clones وروابط صلبة، أسماء وملفات خاصة (FIFO وsockets وروابط دائرية)، مجلدات مقفولة تحت الحمل، المهلة الزمنية تحت الحمل، فحوص متزامنة، حجم نقل JSON من عملية الفحص، مقارنة `FileSizeCalculator`، المكررات تحت الحمل مع عدّ عمليات SHA-256 الكاملة، وأقسام الفحص الأساسي.
+
+مشاكل وجدتها هذه المجموعة وتم إصلاحها: شجرة أعمق من حوالي 254 مستوى كانت تُفشل خريطة التخزين كلها عند ترميز JSON (الصفوف الآن حتى 100 مستوى، والإجماليات تشمل كل المستويات)، وفحص المكررات كان يحتفظ بكل بايت قرأه حتى ينتهي (+4.6 GB) بسبب Data في autorelease pool.
 
 لتغييرات الواجهة، اختبر التنقل والبحث وحالة التحميل وعدم وجود نتائج، وتأكد من أن الأزرار لا تؤثر على اختيارات صفحة أخرى. لتغييرات التنظيف، أضف حالات للملفات المفقودة، والصلاحيات المرفوضة، والروابط الرمزية، وتغير الملفات بعد الفحص.
 

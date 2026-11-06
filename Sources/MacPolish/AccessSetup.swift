@@ -112,7 +112,7 @@ enum FolderAccessCheck {
     }
 
     static func locations(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [(String, URL)] {
-        [ ("Desktop", home.appending(path: "Desktop")),
+        let personal = [ ("Desktop", home.appending(path: "Desktop")),
           ("Documents", home.appending(path: "Documents")),
           ("Downloads", home.appending(path: "Downloads")),
           ("User caches", home.appending(path: "Library/Caches")),
@@ -127,7 +127,20 @@ enum FolderAccessCheck {
           ("Mail data", home.appending(path: "Library/Mail")),
           ("Safari data", home.appending(path: "Library/Safari")),
           ("iCloud files", home.appending(path: "Library/Mobile Documents")),
-          ("Cloud providers", home.appending(path: "Library/CloudStorage")) ]
+          ("Cloud providers", home.appending(path: "Library/CloudStorage")),
+          ("User logs", home.appending(path: "Library/Logs")),
+          ("User applications", home.appending(path: "Applications")),
+          ("User startup items", home.appending(path: "Library/LaunchAgents")),
+          ("Xcode build data", home.appending(path: "Library/Developer/Xcode/DerivedData")),
+          ("Xcode archives", home.appending(path: "Library/Developer/Xcode/Archives")),
+          ("Simulator caches", home.appending(path: "Library/Developer/CoreSimulator/Caches")) ]
+        let system = [("Startup Data volume", DiskMapService.dataRoot),
+                      ("Applications", "/Applications"), ("System applications", "/System/Applications"),
+                      ("Shared startup agents", "/Library/LaunchAgents"), ("Shared startup services", "/Library/LaunchDaemons")]
+            .map { ($0.0, URL(fileURLWithPath: $0.1)) }
+        var seen: Set<String> = []
+        return (personal + SystemDataScanner.specifications(home: home).map { ($0.name, $0.url) } + system)
+            .filter { seen.insert($0.1.standardizedFileURL.path).inserted }
     }
 }
 
@@ -262,6 +275,7 @@ enum OnboardingStep: Int, CaseIterable {
 @MainActor
 final class AccessSetupModel: ObservableObject {
     static let completedKey = "accessSetupCompletedV1"
+    static let reviewedKey = "accessChecksReviewedV3"
     /// Remembers readable probes; cleared when the user acknowledges restricted access.
     static let fullDiskAccessSeenKey = "fullDiskAccessSeenV1"
     /// The differently signed copies the user last continued past; a new set opens setup again.
@@ -275,8 +289,23 @@ final class AccessSetupModel: ObservableObject {
     @Published var step: OnboardingStep = .welcome {
         didSet { defaults.set(step.rawValue, forKey: Self.stepKey) }
     }
-    @Published var presented: Bool
-    @Published var settingsPresented = false
+    @Published var presented: Bool { didSet { reviewVisibilityChanged() } }
+    @Published var settingsPresented = false { didSet { reviewVisibilityChanged() } }
+    /// Set while `finish()` closes the review, so a completed review is not reported as closed early.
+    private var finishing = false
+    /// Called when every review sheet is closed without finishing, so waiting scans can say they did not start.
+    var onReviewClosed: (@MainActor () -> Void)?
+
+    private func reviewVisibilityChanged() {
+        guard !presented, !settingsPresented, !finishing else { return }
+        onReviewClosed?()
+    }
+
+    /// Locations the last check could not read (restricted, unverified or unanswered), by name. Missing folders
+    /// are not access problems and are not listed.
+    var limitedLocations: [String] {
+        results.filter { [.restricted, .unavailable, .timedOut].contains($0.status) }.map(\.name)
+    }
     @Published var checking = false
     @Published var results: [FolderAccessResult] = []
     @Published var checkedAt: Date?
@@ -372,16 +401,43 @@ final class AccessSetupModel: ObservableObject {
         }
     }
 
+    /// Setup completion requires an actual result for every location, including missing/denied ones.
+    var hasCompletedChecks: Bool {
+        !checking && checkedAt != nil && fullDiskAccess != nil
+            && Set(results.map { $0.url.standardizedFileURL.path }) == Set(FolderAccessCheck.locations().map { $0.1.standardizedFileURL.path })
+    }
+
+    /// Every production scan entry point calls this before starting work.
+    func authorizeScan() -> Bool {
+        guard defaults.bool(forKey: Self.reviewedKey), !checking, !presented, !settingsPresented, !accessLost else {
+            if !presented && !settingsPresented { step = .folders; presented = true }
+            return false
+        }
+        return true
+    }
+
+    /// Called after a completed review, so scans refused by the gate can start.
+    var onFinish: (@MainActor () -> Void)?
+
     func finish() {
+        guard hasCompletedChecks else {
+            step = .folders
+            checkWarning = "Run the folder access checks before continuing. Opening System Settings does not verify access."
+            return
+        }
+        defaults.set(true, forKey: Self.reviewedKey)
         defaults.set(true, forKey: Self.completedKey)
         defaults.removeObject(forKey: Self.stepKey)
         // Continuing without Full Disk Access is the user's choice; do not reopen setup for it at every launch.
         if fullDiskAccess == .restricted { defaults.removeObject(forKey: Self.fullDiskAccessSeenKey) }
         defaults.set(Self.copiesKey(conflictingCopies), forKey: Self.dismissedCopiesKey)
         accessLost = false
+        finishing = true
         presented = false
         settingsPresented = false
+        finishing = false
         cleanupContext = []
+        onFinish?()
     }
 
     func showSettings() {
@@ -556,10 +612,11 @@ struct AccessSetupView: View {
                 }
                 if access.step == .review {
                     Button(access.hasIncompleteAccess ? "Continue with limited access" : "Open Mac Polish") { access.finish() }
-                        .buttonStyle(.borderedProminent).disabled(access.checking)
+                        .buttonStyle(.borderedProminent).disabled(!access.hasCompletedChecks)
                 } else {
                     Button("Continue") { access.step = OnboardingStep(rawValue: access.step.rawValue + 1) ?? .review }
-                        .buttonStyle(.borderedProminent).disabled(access.checking)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(access.checking || (access.step == .folders && !access.hasCompletedChecks))
                 }
             }
         }.padding(28).frame(width: 650, height: 620)

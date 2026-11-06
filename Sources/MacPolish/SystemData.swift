@@ -54,8 +54,7 @@ struct SystemDataScanner: Sendable {
         return "Build cache cleanup completed. " + (total.map(String.init) ?? "")
             + "\nVolumes were not targeted. Deleted cache cannot be restored from Trash; Docker recreates it on future builds. macOS free space may update later."
     }
-    func scan() -> SystemDataReport {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+    static func specifications(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [Spec] {
         let specs: [(String, URL, String)] = [
             ("Docker virtual disk", home.appending(path: "Library/Containers/com.docker.docker"), "Includes images, build cache and volume data. Use Docker to manage its contents."),
             ("Claude", home.appending(path: "Library/Application Support/Claude"), "Virtual machine bundles, app data and caches."),
@@ -77,12 +76,17 @@ struct SystemDataScanner: Sendable {
             ("Swap", URL(fileURLWithPath: "/private/var/vm"), "Virtual memory managed by macOS. Do not delete while the system is running."),
             ("Shared Library", URL(fileURLWithPath: "/Library"), "Shared support files, developer tools, audio assets and logs.")
         ]
-        let areas = Self.measureAll(specs.map { Spec(name: $0.0, url: $0.1, note: $0.2) }) {
-            Self.measure(name: $0.name, url: $0.url, note: $0.note)
+        return specs.map { Spec(name: $0.0, url: $0.1, note: $0.2) }
+    }
+
+    func scan(cancellation: ScanCancellation? = nil) -> SystemDataReport {
+        let reader = DiskMapService.workerReader(cancellation: cancellation)
+        let areas = Self.measureAll(Self.specifications()) {
+            Self.measure(name: $0.name, url: $0.url, note: $0.note, reader: reader)
         }.sorted { ($0.bytes ?? -1) > ($1.bytes ?? -1) }
         let docker: String
         if let executable = Self.dockerExecutable {
-            let result = Self.run(executable, ["--context", "desktop-linux", "system", "df"], timeout: 25)
+            let result = Self.run(executable, ["--context", "desktop-linux", "system", "df"], timeout: 25, cancellation: cancellation)
             docker = result.status == 0 ? result.output : "Docker details unavailable. Start Docker Desktop and refresh. The disk measurement above is still available."
         } else {
             docker = "Docker CLI is not installed. The disk measurement above is still available."
@@ -147,7 +151,14 @@ struct SystemDataScanner: Sendable {
         return nil
     }
 
-    static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval, captureErrors: Bool = false) -> (output: String, status: Int32) {
+    /// Status returned when `cancellation` stopped the process (or kept it from starting).
+    static let cancelledStatus: Int32 = -2
+
+    /// Runs `executable` with a time limit. Time asleep does not count against the limit (monotonic clock), so a scan
+    /// running when the Mac sleeps is not reported as timed out on wake. Cancelling ends the process within ~50 ms.
+    static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval, captureErrors: Bool = false,
+                    cancellation: ScanCancellation? = nil) -> (output: String, status: Int32) {
+        if cancellation?.isCancelled == true { return ("", cancelledStatus) }
         let fm = FileManager.default
         let directory = fm.temporaryDirectory.appending(path: "MacPolish-measure-" + UUID().uuidString)
         do {
@@ -166,8 +177,13 @@ struct SystemDataScanner: Sendable {
             process.standardOutput = handle
             process.standardError = captureErrors ? handle : FileHandle.nullDevice
             try process.run()
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+            WorkerProcesses.shared.track(process)
+            defer { WorkerProcesses.shared.untrack(process) }
+            let deadline = DispatchTime.now() + timeout
+            while process.isRunning && DispatchTime.now() < deadline && cancellation?.isCancelled != true {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            let cancelled = process.isRunning && cancellation?.isCancelled == true
             let timedOut = process.isRunning
             if timedOut {
                 process.terminate()
@@ -178,6 +194,7 @@ struct SystemDataScanner: Sendable {
                 while process.isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.05) }
                 if !process.isRunning { process.waitUntilExit() }
             }
+            if cancelled { return ("", cancelledStatus) }
             let output = (try? String(contentsOf: outputURL, encoding: .utf8)) ?? ""
             return (output, timedOut ? -1 : process.terminationStatus)
         } catch { return (error.localizedDescription, -1) }

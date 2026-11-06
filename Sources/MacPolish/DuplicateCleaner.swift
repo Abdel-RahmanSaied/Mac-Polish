@@ -19,8 +19,12 @@ enum FileFingerprint {
         var hash = SHA256()
         for offset in offsets {
             try checkDeadline(deadline)
-            try handle.seek(toOffset: UInt64(offset))
-            hash.update(data: try handle.read(upToCount: Int(min(chunk, length - offset))) ?? Data())
+            // FileHandle returns autoreleased buffers; without a pool, a worker hashing thousands of files
+            // keeps every byte it read until it exits (measured: +4.6 GB footprint for 4.7 GB read).
+            try autoreleasepool {
+                try handle.seek(toOffset: UInt64(offset))
+                hash.update(data: try handle.read(upToCount: Int(min(chunk, length - offset))) ?? Data())
+            }
         }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
@@ -37,8 +41,12 @@ enum FileFingerprint {
         var hasher = SHA256()
         while true {
             try checkDeadline(deadline)
-            guard let data = try handle.read(upToCount: 1_024 * 1_024), !data.isEmpty else { break }
-            hasher.update(data: data)
+            let finished: Bool = try autoreleasepool {
+                guard let data = try handle.read(upToCount: 1_024 * 1_024), !data.isEmpty else { return true }
+                hasher.update(data: data)
+                return false
+            }
+            if finished { break }
         }
         let after = try FileManager.default.attributesOfItem(atPath: url.path)
         guard before[.modificationDate] as? Date == after[.modificationDate] as? Date,
@@ -51,7 +59,17 @@ enum FileFingerprint {
 }
 
 struct DuplicateCleaner: Sendable {
-    func clean(_ files: [DuplicateFile], trashItem: @Sendable (URL) throws -> Void = { url in
+    /// Identity of a verified file: any write changes the modification date, size or file number.
+    private static func identity(_ url: URL) throws -> [AnyHashable] {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let parts: [AnyHashable?] = [attributes[.modificationDate] as? Date, attributes[.size] as? NSNumber,
+                                     attributes[.systemFileNumber] as? NSNumber]
+        return parts.map { $0 ?? AnyHashable("unknown") }
+    }
+
+    /// `deadline` bounds the whole cleanup: hashing a stalled cloud or network file must not leave the page busy forever.
+    func clean(_ files: [DuplicateFile], deadline: Date? = Date().addingTimeInterval(600),
+               trashItem: @Sendable (URL) throws -> Void = { url in
         _ = try FileManager.default.trashItem(at: url, resultingItemURL: nil)
     }) -> CleanupResult {
         var removed: Set<UUID> = []
@@ -68,15 +86,20 @@ struct DuplicateCleaner: Sendable {
                 selected.removeAll { $0.id == group[0].id }
             }
             var keeper: DuplicateFile?
+            var keeperIdentity: [AnyHashable] = []
             var keeperIssue: CleanupIssue?
             for file in retained {
                 do {
-                    guard try FileFingerprint.sha256(file.url) == key else {
+                    let identity = try Self.identity(file.url)
+                    guard try FileFingerprint.sha256(file.url, deadline: deadline) == key, try Self.identity(file.url) == identity else {
                         keeperIssue = CleanupIssue(url: file.url, kind: .changed, detail: "The retained copy changed. This group was skipped; scan again.")
                         continue
                     }
                     keeper = file
+                    keeperIdentity = identity
                     break
+                } catch is FileFingerprint.DeadlineReached {
+                    keeperIssue = CleanupIssue(url: file.url, kind: .other, detail: "Verification reached its time limit. Nothing in this group was moved.")
                 } catch { keeperIssue = TrashValidation.issue(for: error as NSError, url: file.url) }
             }
             guard let keeper else {
@@ -88,12 +111,14 @@ struct DuplicateCleaner: Sendable {
                     // Hash the source first, then the retained copy; compare source identity again
                     // so edits made while verifying the keeper cannot slip into the cleanup plan.
                     let before = try FileManager.default.attributesOfItem(atPath: file.url.path)
-                    guard try FileFingerprint.sha256(file.url) == key else {
+                    guard try FileFingerprint.sha256(file.url, deadline: deadline) == key else {
                         issues.append(CleanupIssue(url: file.url, kind: .changed, detail: "The duplicate changed. This item was skipped; scan again."))
                         continue
                     }
+                    // The keeper's content was hashed once for this group; a cheap identity check per file
+                    // catches any later write without reading a large keeper again for every copy.
                     do {
-                        guard try FileFingerprint.sha256(keeper.url) == key else {
+                        guard try Self.identity(keeper.url) == keeperIdentity else {
                             issues.append(CleanupIssue(url: keeper.url, kind: .changed, detail: "The retained copy changed. This group was skipped; scan again."))
                             break
                         }
@@ -114,6 +139,8 @@ struct DuplicateCleaner: Sendable {
                     removed.formUnion(result.removedItemIDs)
                     bytes += result.reclaimedBytes
                     issues += result.issues
+                } catch is FileFingerprint.DeadlineReached {
+                    issues.append(CleanupIssue(url: file.url, kind: .other, detail: "Verification reached its time limit. This item was not moved."))
                 } catch { issues.append(TrashValidation.issue(for: error as NSError, url: file.url)) }
             }
         }

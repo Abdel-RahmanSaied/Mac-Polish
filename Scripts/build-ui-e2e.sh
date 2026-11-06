@@ -1,6 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
+source Scripts/sdk.sh
 APP="$PWD/.build/UIE2E.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 typeset -a SOURCES

@@ -30,6 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    /// Quitting ends any scan worker still running instead of leaving it to finish its time limit.
+    func applicationWillTerminate(_ notification: Notification) {
+        WorkerProcesses.shared.terminateAll()
+    }
 }
 
 struct MacPolishApp: App {

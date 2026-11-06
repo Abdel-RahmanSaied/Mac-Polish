@@ -10,6 +10,7 @@ enum ScanWorker {
         // Only the app binary itself may launch it; `open --args`, shells and scripts are refused.
         guard isLaunchedBySameExecutable() else { return 3 }
         guard arguments.indices.contains(index + 1) else { return 2 }
+        watchParent()
         func write<T: Encodable>(_ value: T) throws {
             FileHandle.standardOutput.write(try JSONEncoder().encode(value))
         }
@@ -31,6 +32,14 @@ enum ScanWorker {
                 guard let request = treeRequest(arguments) else { return 2 }
                 try write(DiskTreeScanner.scan(request.root, options: request.options))
             case "startup": try write(StartupScanner().scan())
+            case "startup-audit": try write(StartupAuditor.workerRun(arguments: arguments))
+            case "orphans": try write(OrphanedDataScanner.workerRun(arguments: arguments))
+            case "app-insights":
+                guard let insights = ApplicationInsightScanner.workerRun(arguments: arguments) else { return 2 }
+                try write(insights)
+            case "artifacts":
+                guard let report = ProjectArtifactScanner.workerReport(arguments: arguments) else { return 2 }
+                try write(report)
             case "access":
                 let requested = value(after: "--location")
                 let locations = FolderAccessCheck.locations().filter { requested == nil || $0.0 == requested }
@@ -41,6 +50,20 @@ enum ScanWorker {
             }
             return 0
         } catch { return 2 }
+    }
+
+    nonisolated(unsafe) private static var parentWatch: DispatchSourceProcess?
+
+    /// Ends the worker as soon as the app that started it exits, quits or crashes, so no read keeps running
+    /// unattended until its own time limit.
+    static func watchParent() {
+        let parent = getppid()
+        let source = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .global(qos: .utility))
+        source.setEventHandler { _exit(4) }
+        source.resume()
+        parentWatch = source
+        // The app may already be gone before the watch started; launchd then adopted this process.
+        if getppid() != parent { _exit(4) }
     }
 
     /// `--root <path> --options <json>` for the tree mode; nil when either is missing or invalid.

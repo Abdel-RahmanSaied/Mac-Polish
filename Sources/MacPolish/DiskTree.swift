@@ -83,11 +83,22 @@ struct DiskTreeOptions: Codable, Sendable, Equatable {
     var maximumChildren = 200
     /// Folders deeper than this keep their totals but not their rows (0 = only the root total).
     var keepDepth = Int.max
+    /// Rows are never nested deeper than this, whatever `keepDepth` says. Each level is two JSON containers
+    /// and the worker's encoder refuses about 512, so a pathological 300-level folder chain used to fail the
+    /// whole Storage Map. Deeper folders still count fully in their ancestors' totals.
+    static let maximumRowDepth = 100
     /// Absolute folder paths to skip, for example folders scanned separately.
     var excluded: [String] = []
     /// After this moment, folders not yet read are reported as not scanned.
     var deadline: Date?
-    var threads = 8
+    var threads = DiskTreeOptions.defaultThreads
+    /// Per-file facts (kinds, ages, largest files); nil skips them.
+    var insights: DiskInsightOptions?
+
+    /// Directory listing contends inside the kernel, so more threads stop helping early. Measured on the startup
+    /// disk of a 10-core Apple silicon Mac (1.15M files): 1 thread 18.8 s, 2: 11.3 s, 4: 7.4 s, 6: 7.2 s, 8: 8.1 s,
+    /// 12: 10.6 s. About half the cores plus one, between 2 and 6, stays near the fastest on smaller and larger chips.
+    static var defaultThreads: Int { max(2, min(6, ProcessInfo.processInfo.activeProcessorCount / 2 + 1)) }
 
     /// Keep every immediate child; recursively measure sizes without retaining deeper display rows.
     static var detail: DiskTreeOptions {
@@ -103,6 +114,8 @@ struct DiskTreeResult: Codable, Sendable, Equatable {
     var missing = false
     /// The first unreadable folders found (at most 50), sorted.
     var unreadablePaths: [String] = []
+    /// Present when the options asked for insights.
+    var insights: DiskInsights?
 }
 
 /// Reads a folder tree with several threads, keeping only rows large enough to matter.
@@ -118,10 +131,19 @@ enum DiskTreeScanner {
         }
         switch item.kind {
         case .file:
-            return DiskTreeResult(root: DiskNode(name: name, kind: .file, bytes: item.attributedBytes, files: 1,
-                                                 uncertainBytes: item.uncertainBytes))
+            var result = DiskTreeResult(root: DiskNode(name: name, kind: .file, bytes: item.attributedBytes, files: 1,
+                                                       uncertainBytes: item.uncertainBytes))
+            if let insight = options.insights {
+                let collector = DiskInsightCollector(limit: insight.largestFiles, now: insight.referenceDate ?? Date())
+                collector.file(name: name, in: (path as NSString).deletingLastPathComponent, bytes: item.attributedBytes,
+                               modified: item.modified, inheritedKind: nil)
+                result.insights = collector.finish()
+            }
+            return result
         case .symlink, .other:
-            return DiskTreeResult(root: DiskNode(name: name, kind: .file))
+            var result = DiskTreeResult(root: DiskNode(name: name, kind: .file))
+            if options.insights != nil { result.insights = DiskInsights(specialEntries: 1) }
+            return result
         case .folder:
             return Engine(options: options, device: item.device).run(root: path, name: name)
         }
@@ -133,6 +155,8 @@ enum DiskTreeScanner {
         let path: String
         let depth: Int
         let parent: Pending?
+        /// Set inside packages and well-known folders: every file below has this kind (outermost wins).
+        let inheritedKind: DiskInsights.Kind?
         var kind = DiskNode.Kind.folder
         var remaining = 0
         var subfolders: [DiskNode] = []
@@ -140,11 +164,12 @@ enum DiskTreeScanner {
         var own = DiskNode(name: "", kind: .folder)
         var small = DiskNode(name: DiskNode.smallerItemsName, kind: .smallerItems)
 
-        init(name: String, path: String, depth: Int, parent: Pending?) {
+        init(name: String, path: String, depth: Int, parent: Pending?, inheritedKind: DiskInsights.Kind? = nil) {
             self.name = name
             self.path = path
             self.depth = depth
             self.parent = parent
+            self.inheritedKind = inheritedKind
         }
     }
 
@@ -158,39 +183,56 @@ enum DiskTreeScanner {
         var finished: DiskNode?
         var unreadablePaths: [String] = []
         var incomplete = false
+        var exitedThreads = 0
+        var insights: DiskInsights?
+        let threadCount: Int
+        let now: Date
 
         init(options: DiskTreeOptions, device: Int32) {
             self.options = options
             self.device = device
+            threadCount = max(1, options.threads)
+            now = options.insights?.referenceDate ?? Date()
             excluded = Set(options.excluded.map { $0.count > 1 && $0.hasSuffix("/") ? String($0.dropLast()) : $0 })
         }
 
         func run(root: String, name: String) -> DiskTreeResult {
-            stack = [Pending(name: name, path: root, depth: 0, parent: nil)]
-            for _ in 0..<max(1, options.threads) {
+            stack = [Pending(name: name, path: root, depth: 0, parent: nil, inheritedKind: DiskInsights.folderKind(name))]
+            for _ in 0..<threadCount {
                 let thread = Thread { [self] in work() }
                 thread.qualityOfService = .userInitiated
                 thread.start()
             }
             condition.lock()
-            while finished == nil { condition.wait() }
-            let result = DiskTreeResult(root: finished!, incomplete: incomplete, unreadablePaths: unreadablePaths.sorted())
+            // Every thread merges its own insights as it leaves, so wait for all of them, not only the root.
+            while finished == nil || exitedThreads < threadCount { condition.wait() }
+            let result = DiskTreeResult(root: finished!, incomplete: incomplete, unreadablePaths: unreadablePaths.sorted(),
+                                        insights: insights)
             condition.unlock()
             return result
         }
 
         private func work() {
+            let collector = options.insights.map { DiskInsightCollector(limit: $0.largestFiles, now: now) }
             while true {
                 condition.lock()
                 while stack.isEmpty && finished == nil { condition.wait() }
-                if finished != nil { condition.unlock(); return }
+                if finished != nil {
+                    if let collector, let limit = options.insights?.largestFiles {
+                        if insights == nil { insights = collector.finish() } else { insights!.merge(collector.finish(), keepingLargest: limit) }
+                    }
+                    exitedThreads += 1
+                    condition.broadcast()
+                    condition.unlock()
+                    return
+                }
                 let folder = stack.removeLast()
                 condition.unlock()
-                process(folder)
+                process(folder, collector)
             }
         }
 
-        private func process(_ folder: Pending) {
+        private func process(_ folder: Pending, _ collector: DiskInsightCollector?) {
             if let deadline = options.deadline, Date() >= deadline {
                 folder.kind = .notScanned
                 folder.own.notScanned = 1
@@ -199,6 +241,7 @@ enum DiskTreeScanner {
                 return
             }
             let listing = BulkDirectoryReader.entries(of: folder.path)
+            collector?.folder(depth: folder.depth)
             if listing.error != nil {
                 if listing.entries.isEmpty { folder.kind = .unreadable }
                 folder.own.unreadable += 1
@@ -215,12 +258,16 @@ enum DiskTreeScanner {
                                         uncertainBytes: entry.uncertainBytes)
                     folder.own.add(file)
                     if file.bytes >= options.minimumListedBytes { folder.listedFiles.append(file) } else { folder.small.add(file) }
+                    collector?.file(name: entry.name, in: folder.path, bytes: file.bytes, modified: entry.modified,
+                                    inheritedKind: folder.inheritedKind)
                 case .folder:
                     guard entry.device == device, !entry.isMountPoint else { continue }
                     let path = folder.path == "/" ? "/" + entry.name : folder.path + "/" + entry.name
                     guard !excluded.contains(path) else { continue }
-                    children.append(Pending(name: entry.name, path: path, depth: folder.depth + 1, parent: folder))
+                    children.append(Pending(name: entry.name, path: path, depth: folder.depth + 1, parent: folder,
+                                            inheritedKind: folder.inheritedKind ?? (collector == nil ? nil : DiskInsights.folderKind(entry.name))))
                 case .symlink, .other:
+                    collector?.special()
                     continue
                 }
             }
@@ -258,7 +305,7 @@ enum DiskTreeScanner {
             var node = DiskNode(name: folder.name, kind: folder.kind)
             node.add(folder.own)
             for subfolder in folder.subfolders { node.add(subfolder) }
-            guard folder.depth < options.keepDepth else { return node }
+            guard folder.depth < min(options.keepDepth, DiskTreeOptions.maximumRowDepth) else { return node }
 
             var small = folder.small
             var kept: [DiskNode] = []

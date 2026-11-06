@@ -10,6 +10,8 @@ private func makeUIModel() -> AppModel {
     let root = fm.homeDirectoryForCurrentUser.appending(path: "Library/Caches/MacPolish-UIE2E-" + UUID().uuidString)
     do {
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        // Cleanup History of this test app stays with its fixtures, never in the real app's history file.
+        model.cleanupHistory = CleanupHistoryModel(store: CleanupHistoryStore(url: root.appending(path: "cleanup-history.json")))
         let payload = Data(repeating: 37, count: 2 * 1024 * 1024)
         try payload.write(to: root.appending(path: "a-original.bin"))
         try payload.write(to: root.appending(path: "b-duplicate.bin"))

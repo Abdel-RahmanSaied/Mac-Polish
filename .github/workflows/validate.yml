@@ -22,9 +22,30 @@ jobs:
           bash -n Scripts/install.sh
           zsh -n Scripts/build-app.sh Scripts/package-release.sh Scripts/test.sh Scripts/build-ui-e2e.sh \
             Scripts/sign-app.sh Scripts/verify-release-signature.sh Scripts/create-signing-identity.sh \
-            Scripts/import-signing-identity.sh Tests/SigningCheck.sh Tests/InstallerCheck.sh
+            Scripts/import-signing-identity.sh Scripts/perf.sh Scripts/sdk.sh Scripts/run.sh Tests/SigningCheck.sh Tests/InstallerCheck.sh
           plutil -lint Resources/Info.plist
           git diff --check
+
+  performance:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Performance and load suite (smoke scale)
+        # Correctness is always asserted; timing budgets only warn on shared CI hardware.
+        env:
+          MACPOLISH_PERF_SCALE: smoke
+          MACPOLISH_PERF_BUDGETS: warn
+        run: Scripts/perf.sh
+      - name: Keep metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-metrics
+          path: .build/perf/*.json
+          if-no-files-found: ignore
 
   signing:
     runs-on: macos-15

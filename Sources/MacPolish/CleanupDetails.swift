@@ -6,6 +6,8 @@ struct CleanupOutcome: Sendable {
     let movedCount: Int
     let movedBytes: Int64
     let issues: [CleanupIssue]
+    /// Standardized paths that were moved, so other pages can drop them from their lists.
+    var movedURLs: Set<URL> = []
 }
 
 struct CleanupDetailsView: View {

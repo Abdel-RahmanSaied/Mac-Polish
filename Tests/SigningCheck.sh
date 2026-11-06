@@ -8,6 +8,7 @@
 # Uses a temporary keychain; the login keychain is never touched.
 set -euo pipefail
 ROOT="${0:A:h:h}"
+source "$ROOT/Scripts/sdk.sh"
 WORK="$(mktemp -d -t macpolish-signing)"
 KEYCHAIN="$WORK/signing-test.keychain-db"
 CI_KEYCHAIN="$WORK/ci-import.keychain-db"
