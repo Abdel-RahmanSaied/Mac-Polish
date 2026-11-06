@@ -225,8 +225,11 @@ enum ReleaseFlowsCheck {
         precondition(app.deepScan.overall == .scanning && app.storageState == .loading && app.artifacts.state == .loading)
         let started = Date()
         app.deepScan.cancel()
-        await eventually("cancel finishes", timeout: 2) { !app.deepScan.running }
-        precondition(Date().timeIntervalSince(started) < 1, "cancel is prompt")
+        // Time bounds in this check are sanity bounds for unoptimised builds on shared CI runners. Each still
+        // separates the behaviour under test from the failure it guards against (here: waiting for a worker's
+        // 60 s time limit). Exact budgets belong in Scripts/perf.sh.
+        await eventually("cancel finishes", timeout: 5) { !app.deepScan.running }
+        precondition(Date().timeIntervalSince(started) < 3, "cancel is prompt")
         precondition(app.deepScan.overall == .cancelled && app.deepScan.steps.allSatisfy { $0.status == .cancelled },
                      "every step shows Cancelled: \(app.deepScan.steps.map(\.status))")
         // No stale loading indicators anywhere.
@@ -439,16 +442,16 @@ enum ReleaseFlowsCheck {
         var started = Date()
         let groups = AppModel.groups(of: files)
         let groupSeconds = Date().timeIntervalSince(started)
-        precondition(groups.count == 25_000 && groupSeconds < 2, "grouping 100k duplicates took \(groupSeconds) s")
+        precondition(groups.count == 25_000 && groupSeconds < 30, "grouping 100k duplicates took \(groupSeconds) s (quadratic would take minutes)")
         started = Date()
         let kept = Set(groups.filter { $0.files.allSatisfy(\.isSelected) }.compactMap { $0.files.first?.id })
         let plan = files.filter { $0.isSelected && !kept.contains($0.id) }
         let planSeconds = Date().timeIntervalSince(started)
-        precondition(plan.count == files.filter(\.isSelected).count - kept.count && planSeconds < 1,
+        precondition(plan.count == files.filter(\.isSelected).count - kept.count && planSeconds < 15,
                      "the removal plan for 100k files took \(planSeconds) s")
         started = Date()
         let presentations = (0..<100_000).map { P.of(ModuleState.ready, hasResults: $0 % 2 == 0) }
-        precondition(presentations.count == 100_000 && Date().timeIntervalSince(started) < 1)
+        precondition(presentations.count == 100_000 && Date().timeIntervalSince(started) < 15)
     }
 
     // MARK: History location
@@ -483,13 +486,13 @@ enum ReleaseFlowsCheck {
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { cancellation.cancel() }
         var started = Date()
         let cancelled = SystemDataScanner.run("/bin/sleep", ["30"], timeout: 60, cancellation: cancellation)
-        precondition(cancelled.status == SystemDataScanner.cancelledStatus && Date().timeIntervalSince(started) < 2,
+        precondition(cancelled.status == SystemDataScanner.cancelledStatus && Date().timeIntervalSince(started) < 5,
                      "cancel ended the process in \(Date().timeIntervalSince(started)) s")
         precondition(WorkerProcesses.shared.count == 0, "finished processes are not tracked")
         // Already cancelled: nothing starts.
         started = Date()
         precondition(SystemDataScanner.run("/bin/sleep", ["30"], timeout: 60, cancellation: cancellation).status == SystemDataScanner.cancelledStatus
-                     && Date().timeIntervalSince(started) < 0.2)
+                     && Date().timeIntervalSince(started) < 2)
         precondition(DiskScanService.readValue(String.self, mode: "basic", cancellation: cancellation).failureCancelled, "cancelled reads report cancellation")
         // Quitting ends every tracked process.
         let quitting = ScanCancellation()
@@ -500,7 +503,7 @@ enum ReleaseFlowsCheck {
         precondition(WorkerProcesses.shared.count == 1, "the running process is tracked")
         started = Date()
         WorkerProcesses.shared.terminateAll()
-        while WorkerProcesses.shared.count > 0 && Date().timeIntervalSince(started) < 3 { usleep(5_000) }
+        while WorkerProcesses.shared.count > 0 && Date().timeIntervalSince(started) < 10 { usleep(5_000) }
         precondition(WorkerProcesses.shared.count == 0, "quitting ended the process")
 
         // A worker whose app disappears exits by itself.
@@ -515,7 +518,7 @@ enum ReleaseFlowsCheck {
         let childPID = Int32(String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         precondition(childPID > 0, "child started")
-        let exitDeadline = Date().addingTimeInterval(3)
+        let exitDeadline = Date().addingTimeInterval(10)
         while kill(childPID, 0) == 0 && Date() < exitDeadline { usleep(20_000) }
         let survived = kill(childPID, 0) == 0
         if survived { kill(childPID, SIGKILL) }

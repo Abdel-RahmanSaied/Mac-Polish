@@ -993,7 +993,8 @@ enum HealthCheck {
         let start = Date()
         let directSystem = direct.system()
         let result = await BackgroundWork.run { HealthScanner.check(.init(mode: .extended), system: directSystem, cancellation: token) }
-        precondition(Date().timeIntervalSince(start) < 2, "check returns soon after cancellation")
+        // Sanity bound for slow CI runners; without cancellation the blocked fakes would never return.
+        precondition(Date().timeIntervalSince(start) < 5, "check returns soon after cancellation")
         precondition(result.cancelled && result.category(.diskHealth)?.cancelledReason != nil && result.category(.battery)?.state == .healthy)
         stuck.open()
     }

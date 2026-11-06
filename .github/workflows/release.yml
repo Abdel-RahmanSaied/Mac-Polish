@@ -7,7 +7,8 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
-    timeout-minutes: 30
+    # Regression suite (about 18 minutes on hosted runners) plus the signed release build.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7.0.1
         with:

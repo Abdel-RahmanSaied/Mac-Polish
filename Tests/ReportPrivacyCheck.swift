@@ -320,7 +320,9 @@ enum ReportPrivacyCheck {
         let started = Date()
         let bigSafe = timed.text(big)
         let elapsed = Date().timeIntervalSince(started)
-        precondition(elapsed < 0.5, "5,000 lines took \(elapsed) s")
+        // A sanity bound for unoptimised builds on slow CI runners (about 0.15 s locally); a quadratic redactor
+        // would take minutes. Exact performance budgets belong in Scripts/perf.sh.
+        precondition(elapsed < 10, "5,000 lines took \(elapsed) s")
         precondition(!bigSafe.lowercased().contains("jdoe") && !bigSafe.contains("C02XK0ABJGH5"))
         precondition(bigSafe.contains("~/Projects/‹project 1›/node_modules/pkg0/index.js"))
         precondition(bigSafe.contains("~/Projects/‹project 1›/node_modules/pkg1500/index.js"), "project alias not stable")
