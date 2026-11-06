@@ -8,6 +8,8 @@
 	<string>Mac Polish</string>
 	<key>CFBundleExecutable</key>
 	<string>MacPolish</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.icns</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.asaied.macpolish</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -17,28 +19,26 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.10.0</string>
+	<string>0.11.0</string>
 	<key>CFBundleVersion</key>
-	<string>16</string>
+	<string>17</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<false/>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>Mac Polish checks Desktop for large, old and duplicate files so you can review cleanup suggestions. Files are only removed after your confirmation.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>Mac Polish checks Documents for large, old and duplicate files so you can review cleanup suggestions. Files are only removed after your confirmation.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>Mac Polish checks Downloads for large, old and duplicate files so you can review cleanup suggestions. Files are only removed after your confirmation.</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon.icns</string>
-	<key>NSRemovableVolumesUsageDescription</key>
-	<string>Mac Polish reads a disk you select to show its files and storage usage.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>Mac Polish reads a network folder you select to analyze its storage usage.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Mac Polish reads a disk you select to show its files and storage usage.</string>
 </dict>
 </plist>
