@@ -76,14 +76,24 @@ struct ApplicationScanner: Sendable {
                 library.appending(path: "Preferences/\(bundleIdentifier).plist"),
                 library.appending(path: "Application Support/\(bundleIdentifier)"),
                 library.appending(path: "Saved Application State/\(bundleIdentifier).savedState"),
-                library.appending(path: "Containers/\(bundleIdentifier)")
+                library.appending(path: "Containers/\(bundleIdentifier)"),
+                library.appending(path: "HTTPStorages/\(bundleIdentifier)"),
+                library.appending(path: "HTTPStorages/\(bundleIdentifier).binarycookies"),
+                library.appending(path: "WebKit/\(bundleIdentifier)"),
+                library.appending(path: "Logs/\(bundleIdentifier)"),
+                library.appending(path: "Application Scripts/\(bundleIdentifier)"),
+                library.appending(path: "Cookies/\(bundleIdentifier).binarycookies")
             ]
+            // Exact-name matches only; see AppLeftoverLocations (team-only group containers never match).
+            candidates += AppLeftoverLocations.byHostPreferences(bundleIdentifier, library: library)
+            candidates += AppLeftoverLocations.groupContainers(bundleIdentifier, library: library)
         }
 
         if isPlainName(appName) {
             candidates += [
                 library.appending(path: "Application Support/\(appName)"),
-                library.appending(path: "Caches/\(appName)")
+                library.appending(path: "Caches/\(appName)"),
+                library.appending(path: "Logs/\(appName)")
             ]
         }
 
@@ -178,8 +188,9 @@ struct DuplicateScanner: Sendable {
                 }
                 for (digest, matches) in byHash where matches.count > 1 {
                     results += matches.map {
+                        // nil (unknown) falls back to the content length; 0 would hide the copy's space entirely.
                         DuplicateFile(id: UUID(), url: $0, size: size, fingerprint: digest, isSelected: false,
-                                      diskBytes: FileAttributes.read(path: $0.path)?.attributedBytes ?? 0)
+                                      diskBytes: FileAttributes.read(path: $0.path)?.attributedBytes)
                     }
                 }
                 if timedOut { incomplete = true; break sizeGroups }
@@ -238,6 +249,17 @@ struct ApplicationUninstaller: Sendable {
     private var fileManager: FileManager { .default }
     /// Folders apps may be removed from; nil means /Applications and ~/Applications.
     var applicationRoots: [URL]? = nil
+    /// Moves one item to Trash; injected by tests. Never a permanent delete.
+    var trashItem: @Sendable (URL) throws -> Void = { url in _ = try FileManager.default.trashItem(at: url, resultingItemURL: nil) }
+
+    /// The app at the scanned path is still the one that was reviewed: same bundle identifier and version.
+    /// Info.plist is read directly because `Bundle` caches per path and would miss an app updated in place.
+    static func isUnchanged(_ application: ApplicationItem) -> Bool {
+        let plist = application.url.appending(path: "Contents/Info.plist")
+        guard let info = NSDictionary(contentsOf: plist) as? [String: Any] else { return false }
+        let version = info["CFBundleShortVersionString"] as? String ?? info["CFBundleVersion"] as? String
+        return info["CFBundleIdentifier"] as? String == application.bundleIdentifier && version == application.version
+    }
 
     func remove(_ applications: [ApplicationItem]) -> ApplicationRemovalResult {
         var removedIDs: Set<UUID> = []
@@ -258,8 +280,15 @@ struct ApplicationUninstaller: Sendable {
                 issues.append(issue)
                 continue
             }
+            guard Self.isUnchanged(application) else {
+                let issue = CleanupIssue(url: application.url, kind: .changed,
+                                         detail: "This app changed after the scan (updated, replaced or moved). Scan again before removing it.")
+                failures.append(issue.message)
+                issues.append(issue)
+                continue
+            }
             do {
-                _ = try fileManager.trashItem(at: application.url, resultingItemURL: nil)
+                try trashItem(application.url)
                 reclaimedBytes += application.size
 
                 for leftover in application.leftoverURLs where isAllowedLeftover(leftover) {
@@ -270,7 +299,7 @@ struct ApplicationUninstaller: Sendable {
                     }
                     do {
                         let leftoverSize = FileSizeCalculator.allocatedSize(of: leftover)
-                        _ = try fileManager.trashItem(at: leftover, resultingItemURL: nil)
+                        try trashItem(leftover)
                         reclaimedBytes += leftoverSize
                     } catch {
                         let issue = TrashValidation.issue(for: error as NSError, url: leftover)

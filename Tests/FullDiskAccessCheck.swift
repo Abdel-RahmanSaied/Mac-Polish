@@ -57,6 +57,9 @@ enum FullDiskAccessCheck {
         await lost.verifyOnLaunch()
         precondition(lost.presented && lost.accessLost && lost.fullDiskAccess == .restricted, "A lost grant reopens setup")
         // Continuing without it is the user's choice: do not ask again at every launch.
+        lost.results = FolderAccessCheck.locations().map { FolderAccessResult(name: $0.0, url: $0.1, status: .readable) }
+        lost.checkedAt = Date()
+        if lost.fullDiskAccess == nil { lost.fullDiskAccess = .unknown }
         lost.finish()
         precondition(!lost.accessLost && !store.bool(forKey: AccessSetupModel.fullDiskAccessSeenKey))
         let acknowledged = AccessSetupModel(defaults: store, probe: { .restricted }, copies: { [] })

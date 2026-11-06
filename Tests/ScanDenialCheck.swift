@@ -100,6 +100,10 @@ enum ScanDenialCheck {
         precondition(outcome.incomplete == [.downloads], "Only the stalled section is incomplete, got \(outcome.incomplete)")
         precondition(outcome.items.map(\.url.lastPathComponent) == ["app"], "Readable results are kept")
         guard let warning = outcome.warning else { preconditionFailure("Denied folders produce a warning") }
+        precondition(outcome.deniedPaths == [desktop.path], "Worker denial paths must survive aggregation")
+        precondition(warning.contains(desktop.path), "Show the exact denied path, not only the section name")
+        precondition(warning.contains("does not mean Full Disk Access is off") && !warning.contains("Turn on Full Disk Access"),
+                     "A filesystem denial must not claim that a privacy permission is missing")
         precondition(warning.contains("Desktop") && warning.contains("Downloads"), "The warning names both locations: \(warning)")
         precondition(warning.contains("Full Disk Access") && warning.contains("Files & Folders"),
                      "The warning says how to allow access: \(warning)")

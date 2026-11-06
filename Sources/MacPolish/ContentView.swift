@@ -4,10 +4,10 @@ import SwiftUI
 extension SidebarDestination {
     var color: Color {
         switch self {
-        case .overview, .cleanup, .optimize: .teal
+        case .overview, .cleanup, .optimize, .health: .teal
         case .largeFiles, .storage, .systemData, .memory: .blue
-        case .duplicates, .applications: .purple
-        case .developer: .orange
+        case .duplicates, .applications, .orphanedData: .purple
+        case .developer, .artifacts: .orange
         case .oldFiles: .pink
         case .startup: .mint
         }
@@ -23,6 +23,13 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        GeometryReader { viewport in
+            mainContent
+                .frame(width: viewport.size.width, height: viewport.size.height)
+        }
+    }
+
+    private var mainContent: some View {
         NavigationSplitView {
             SidebarView(selection: $model.destination)
                 .navigationSplitViewColumnWidth(min: 225, ideal: 240, max: 280)
@@ -38,6 +45,8 @@ struct ContentView: View {
                 switch model.destination {
                 case .overview:
                     OverviewView()
+                case .health:
+                    HealthView(model: model.health)
                 case .optimize:
                     OptimizeView(optimizer: model.optimizer)
                 case .memory:
@@ -54,19 +63,31 @@ struct ContentView: View {
                     SystemDataView()
                 case .developer:
                     ResultsView(title: "Developer Cleanup", items: model.developerItems)
+                case .artifacts:
+                    ProjectArtifactsView(model: model.artifacts, onReviewPermissions: { model.access.presented = true })
                 case .oldFiles:
                     ResultsView(title: "Old Files", items: model.oldFileItems)
                 case .applications:
                     ApplicationsView()
                 case .startup:
-                    StartupItemsView()
+                    StartupAuditView(model: model.startupAudit, onReviewPermissions: { model.access.presented = true })
+                case .orphanedData:
+                    OrphanedDataView(model: model.orphans, onReviewPermissions: { model.access.presented = true })
                 }
             }
             // Detail column only: across the whole split view, the banner overlapped the sidebar
             // header, which runs under the hidden title bar and does not take this inset into account.
-            .safeAreaInset(edge: .top, spacing: 0) { UpdateBanner(updates: model.updates) }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    UpdateBanner(updates: model.updates)
+                    ScanGateBanner()
+                }
+            }
         }
         .modifier(AccessSetupPresenter(access: model.access))
+        .sheet(isPresented: $model.showsCleanupHistory) {
+            CleanupHistoryView(model: model.cleanupHistory)
+        }
         .sheet(isPresented: $model.showsCleanupDetails) {
             if let outcome = model.cleanupOutcome {
                 CleanupDetailsView(outcome: outcome, onPermissions: model.reviewCleanupPermissions,
@@ -98,9 +119,9 @@ private struct SidebarView: View {
 
     var body: some View {
         List(selection: $selection) {
-            sidebarSection("WORKSPACE", items: [.overview, .optimize, .memory, .storage, .systemData])
-            sidebarSection("FREE UP SPACE", items: [.cleanup, .largeFiles, .duplicates, .oldFiles])
-            sidebarSection("MANAGE", items: [.applications, .developer, .startup])
+            sidebarSection("WORKSPACE", items: [.overview, .health, .optimize, .memory, .storage, .systemData])
+            sidebarSection("FREE UP SPACE", items: [.cleanup, .largeFiles, .duplicates, .oldFiles, .artifacts])
+            sidebarSection("MANAGE", items: [.applications, .orphanedData, .developer, .startup])
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
@@ -110,6 +131,9 @@ private struct SidebarView: View {
                         Label("Last Cleanup", systemImage: "checklist").frame(maxWidth: .infinity, alignment: .leading)
                     }.buttonStyle(.plain).padding(.vertical, 5)
                 }
+                Button { model.showsCleanupHistory = true } label: {
+                    Label("Cleanup History", systemImage: "clock.arrow.circlepath").frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(.plain).padding(.vertical, 5)
                 Button { openSettings() } label: {
                     Label("Settings", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -128,8 +152,7 @@ private struct SidebarView: View {
         }
         .safeAreaInset(edge: .top) {
             HStack(spacing: 10) {
-                Image(nsImage: Bundle.main.url(forResource: "AppIcon", withExtension: "icns")
-                    .flatMap { NSImage(contentsOf: $0) } ?? NSApplication.shared.applicationIconImage)
+                Image(nsImage: Self.appIcon)
                     .resizable().scaledToFit()
                     .scaleEffect(1.25)
                     .frame(width: 44, height: 44)
@@ -148,6 +171,10 @@ private struct SidebarView: View {
             .padding(.vertical, 22)
         }
     }
+
+    /// Decoded once: the sidebar re-renders on every model change.
+    private static let appIcon: NSImage = Bundle.main.url(forResource: "AppIcon", withExtension: "icns")
+        .flatMap { NSImage(contentsOf: $0) } ?? NSApplication.shared.applicationIconImage
 
     private func sidebarSection(_ title: String, items: [SidebarDestination]) -> some View {
         Section {
@@ -174,6 +201,7 @@ private struct OverviewView: View {
             VStack(spacing: 24) {
                 header
                 scanCard
+                DeepScanCard(deepScan: model.deepScan)
                 summaryCards
                 tools
             }
@@ -217,13 +245,19 @@ private struct OverviewView: View {
                     Button("Optimize") { model.destination = .optimize }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
-                    Button(action: model.startScan) {
-                        Label(model.state == .scanning ? "Scanning…" : "Scan My Mac", systemImage: "sparkle.magnifyingglass")
-                            .padding(.horizontal, 8)
+                    if model.state == .scanning {
+                        Button { model.cancelBasicScan() } label: {
+                            Label("Cancel Scan", systemImage: "stop.circle").padding(.horizontal, 8)
+                        }
+                        .controlSize(.large)
+                    } else {
+                        Button(action: model.startScan) {
+                            Label("Scan My Mac", systemImage: "sparkle.magnifyingglass").padding(.horizontal, 8)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(model.state == .cleaning)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(model.state == .scanning || model.state == .cleaning)
                     if !model.items.isEmpty {
                         Button("Review results") { model.destination = .cleanup }
                             .buttonStyle(.bordered).controlSize(.large)
@@ -349,6 +383,7 @@ private struct OverviewView: View {
         case .finished: model.items.isEmpty ? "Your Mac looks tidy." : "Review the results before cleaning."
         case .cleaning: "Moving selected items to Trash…"
         case .failed(let message): message
+        case .cancelled: "Scan cancelled. Nothing was changed; results from an earlier scan, if any, are still shown."
         }
     }
 }
@@ -397,37 +432,57 @@ private struct ResultsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Scan", action: model.startScan)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(model.state == .scanning || model.state == .cleaning)
+                if model.state == .scanning {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel") { model.cancelBasicScan() }.controlSize(.large).keyboardShortcut(.cancelAction)
+                } else {
+                    Button("Scan", action: model.startScan)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(model.state == .cleaning)
+                }
             }
             .padding(30)
 
             if let warning = model.scanWarning, model.state == .finished {
-                HStack(spacing: 10) {
-                    Label(warning, systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
+                HStack(alignment: .top, spacing: 10) {
+                    ScrollView {
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 80)
                     Button("Review Scan Permissions…") { model.access.presented = true }
                 }
                 .padding(.horizontal, 30).padding(.bottom, 12)
             }
 
-            if case .failed(let message) = model.state {
+            let state = ModulePresentation.of(model.state, hasResults: !items.isEmpty)
+            if case .failed(let message) = state {
                 ContentUnavailableView("Scan incomplete", systemImage: "exclamationmark.triangle", description: Text(message))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Button("Review Scan Permissions…") { model.access.presented = true }
                     .buttonStyle(.borderedProminent).padding(.bottom, 24)
-            } else if model.state == .scanning {
+            } else if state == .loading {
                 VStack(spacing: 15) {
                     ProgressView().controlSize(.large)
                     Text("Finding files to review…").font(.headline)
-                    Text("You can explore other tools while the scan runs.").foregroundStyle(.secondary)
+                    Text("You can explore other tools while the scan runs, or cancel it.").foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if state == .cancelled {
+                ModuleStateView(presentation: .cancelled, subject: title, start: model.startScan)
             } else if items.isEmpty {
-                ContentUnavailableView(model.state == .finished ? "No matching files" : "Ready when you are", systemImage: "sparkle.magnifyingglass", description: Text(model.state == .finished ? "This scan found no files in this category." : "Choose Scan to inspect your Mac and review the results here."))
+                ContentUnavailableView(model.state == .finished ? (largeFilesSkipped ? "Large files were not scanned" : "No matching files") : "Ready when you are",
+                                       systemImage: "sparkle.magnifyingglass",
+                                       description: Text(model.state == .finished
+                                           ? (largeFilesSkipped ? "The last scan did not include files larger than 100 MB. Turn it on in Settings, then scan again. Storage Map lists the largest files anywhere on the disk."
+                                                                : "This scan found no files in this category.")
+                                           : "Choose Scan to inspect your Mac and review the results here."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                ModuleNotice(presentation: state)
                 HStack(spacing: 12) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Filter by name or path", text: $presentation.search)
@@ -459,6 +514,7 @@ private struct ResultsView: View {
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .overlay {
                     if filteredItems.isEmpty {
                         ContentUnavailableView.search(text: presentation.search)
@@ -469,8 +525,10 @@ private struct ResultsView: View {
                     Text("\(visibleSelectedItems.count) selected · \(visibleSelectedSize.formattedBytes)")
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Move Selected to Trash") {
-                        model.requestCleanup(itemIDs: Set(filteredItems.map(\.id)))
+                    Button("Move Selected to Trash…") {
+                        let visible = Set(filteredItems.map(\.id))
+                        let hidden = items.filter { $0.isSelected && !visible.contains($0.id) }.count
+                        model.requestCleanup(itemIDs: visible, source: title, hiddenBySearch: hidden)
                     }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
@@ -480,15 +538,10 @@ private struct ResultsView: View {
                 .background(.bar)
             }
         }
-        .alert("Move selected items to Trash?", isPresented: Binding(
-            get: { model.pendingCleanup != nil },
-            set: { if !$0 { model.cancelCleanup() } }
-        )) {
-            Button("Cancel", role: .cancel) { model.cancelCleanup() }
-            Button("Move to Trash", role: .destructive) { model.confirmCleanup() }
-        } message: {
-            Text("Move \(model.pendingCleanup?.count ?? 0) selected item(s) (\(model.pendingCleanup?.bytes.formattedBytes ?? "")) to Trash. Close the apps that use these files first. Items that changed since the scan are skipped. Space is released when Trash is emptied.")
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Names, count, size, items hidden by the search, why each category is suggested and what may be rebuilt.
+        .cleanupConfirmation($model.pendingConfirmation, onConfirm: { _ in model.confirmCleanup() },
+                             onCancel: { model.cancelCleanup() })
     }
 
     private var visibleSelectedItems: [ScanItem] {
@@ -502,6 +555,9 @@ private struct ResultsView: View {
     private var categories: [ScanCategory] {
         ScanCategory.allCases.filter { category in filteredItems.contains { $0.category == category } }
     }
+
+    /// An empty Large Files page after a scan that skipped those folders is "not scanned", not "nothing found".
+    private var largeFilesSkipped: Bool { title == "Large Files" && !model.lastScanIncludedLargeFiles }
 
     private var visibleSelectedSize: Int64 {
         visibleSelectedItems.reduce(0) { $0 + $1.size }
@@ -553,7 +609,7 @@ private struct ScanItemRow: View {
 
     private var binding: Binding<Bool> {
         Binding(
-            get: { model.items.first(where: { $0.id == item.id })?.isSelected ?? false },
+            get: { item.isSelected },
             set: { newValue in
                 guard let index = model.items.firstIndex(where: { $0.id == item.id }) else { return }
                 model.items[index].isSelected = newValue

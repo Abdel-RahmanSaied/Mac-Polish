@@ -60,6 +60,12 @@ final class OptimizerModel: ObservableObject {
     @Published var completed = false
     var onOutcome: (@MainActor (CleanupOutcome) -> Void)?
     var onDiskMap: (@MainActor (DiskMapReport) -> Void)?
+    /// A finished Docker build cache removal (permanent, done by Docker), for Cleanup History.
+    var onDockerCleanup: (@MainActor () -> Void)?
+    /// Every finished cleanup with the items offered and what happened to each, for Cleanup History.
+    var onCleanup: (@MainActor (_ candidates: [(id: UUID, url: URL, bytes: Int64)], _ result: CleanupResult) -> Void)?
+    /// Moves one item to Trash; injected by tests. Never a permanent delete.
+    var trashItem: @Sendable (URL) throws -> Void = { url in _ = try FileManager.default.trashItem(at: url, resultingItemURL: nil) }
     var selectedBytes: Int64 { candidates.filter(\.selected).reduce(0) { $0 + $1.item.size } }
     var selectedCount: Int { candidates.filter(\.selected).count }
     var hasActions: Bool { selectedCount > 0 || (includeDocker && dockerAvailable) }
@@ -71,7 +77,10 @@ final class OptimizerModel: ObservableObject {
         totalBytes = (attributes?[.systemSize] as? NSNumber)?.int64Value
     }
 
+    var authorizeScan: @MainActor () -> Bool = { true }
+
     func scan() {
+        guard authorizeScan() else { return }
         guard !busy else { return }
         busy = true
         completed = false
@@ -154,8 +163,9 @@ final class OptimizerModel: ObservableObject {
         running = true
         confirm = false
         phase = "Moving reviewed cache and log files to Trash…"
+        let trashItem = trashItem
         Task {
-            let outcome = await BackgroundWork.run(qos: .utility) { () -> (messages: [String], issues: [CleanupIssue], removedIDs: Set<UUID>, movedBytes: Int64) in
+            let outcome = await BackgroundWork.run(qos: .utility) { () -> (messages: [String], issues: [CleanupIssue], removedIDs: Set<UUID>, movedBytes: Int64, result: CleanupResult) in
                 var messages: [String] = []
                 var safe: [ScanItem] = []
                 for candidate in plan {
@@ -167,20 +177,30 @@ final class OptimizerModel: ObservableObject {
                     item.isSelected = true
                     safe.append(item)
                 }
-                let result = SafeCleaner().clean(safe)
+                let result = SafeCleaner().clean(safe, trashItem: trashItem)
                 messages.insert("Moved \(result.removedCount) items (\(result.reclaimedBytes.formattedBytes)) to Trash. Space is released after Trash is emptied.", at: 0)
                 if !result.issues.isEmpty { messages.append(CleanupIssue.summary(result.issues)) }
-                return (messages, result.issues, result.removedItemIDs, result.reclaimedBytes)
+                return (messages, result.issues, result.removedItemIDs, result.reclaimedBytes, result)
             }
+            // Items skipped before the cleaner (changed or missing) are recorded as skipped too.
+            var recorded = outcome.result
+            let skippedEarly = plan.filter { candidate in
+                !outcome.removedIDs.contains(candidate.id) && !recorded.issues.contains { $0.url == candidate.item.url }
+            }
+            recorded.issues += skippedEarly.map { CleanupIssue(url: $0.item.url, kind: .changed, detail: "Changed or missing since the scan; skipped.") }
+            onCleanup?(plan.map { ($0.id, $0.item.url, $0.item.size) }, recorded)
             results = outcome.messages
             cleanupIssues = outcome.issues
-            onOutcome?(CleanupOutcome(date: Date(), movedCount: outcome.removedIDs.count, movedBytes: outcome.movedBytes, issues: outcome.issues))
+            let moved = Set(plan.filter { outcome.removedIDs.contains($0.id) }.map { $0.item.url.standardizedFileURL })
+            onOutcome?(CleanupOutcome(date: Date(), movedCount: outcome.removedIDs.count, movedBytes: outcome.movedBytes,
+                                      issues: outcome.issues, movedURLs: moved))
             if docker {
                 phase = "Cleaning Docker build cache…"
                 let message = await BackgroundWork.run(qos: .utility) {
                     SystemDataScanner.cleanDockerBuildCache()
                 }
                 results.append(message)
+                if message.hasPrefix("Build cache cleanup completed") { onDockerCleanup?() }
             }
             phase = "Updating storage measurements…"
             // Keep recovery responsive instead of waiting for another full scan after access failures.
@@ -207,6 +227,7 @@ final class OptimizerModel: ObservableObject {
 struct OptimizeView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject var optimizer: OptimizerModel
+    @ViewState private var confirmation: CleanupConfirmation?
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -327,18 +348,15 @@ struct OptimizeView: View {
                 Text(optimizer.running ? "Optimization in progress…" : "\(optimizer.selectedCount) files selected" + (optimizer.includeDocker ? " + Docker build cache" : ""))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Optimize Now") { optimizer.confirm = true }
+                Button("Optimize Now…") {
+                    confirmation = .forOptimize(optimizer.candidates.filter(\.selected).map(\.item),
+                                                dockerBuildCacheBytes: optimizer.includeDocker && optimizer.dockerAvailable
+                                                    ? SystemDataScanner.dockerBuildCacheBytes(optimizer.report?.dockerOutput ?? "") : nil)
+                }
                     .buttonStyle(.borderedProminent).controlSize(.large)
                     .disabled(optimizer.busy || optimizer.completed || !optimizer.hasActions)
             }.padding(20).background(.bar)
         }
-        .alert("Run this optimization plan?", isPresented: $optimizer.confirm) {
-            Button("Cancel", role: .cancel) {}
-            Button("Optimize Now", role: .destructive) { optimizer.execute() }
-        } message: {
-            Text("Move \(optimizer.selectedCount) reviewed files (\(optimizer.selectedBytes.formattedBytes)) to Trash."
-                 + (optimizer.includeDocker ? " Permanently remove Docker Desktop build cache as well." : "")
-                 + " Close affected apps first. Changed or missing file paths will be skipped.")
-        }
+        .cleanupConfirmation($confirmation, onConfirm: { _ in optimizer.execute() })
     }
 }

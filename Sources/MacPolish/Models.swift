@@ -2,6 +2,7 @@ import Foundation
 
 enum SidebarDestination: String, CaseIterable, Identifiable {
     case overview = "Overview"
+    case health = "Mac Health"
     case optimize = "Optimize"
     case memory = "Memory"
     case cleanup = "Cleanup"
@@ -10,15 +11,18 @@ enum SidebarDestination: String, CaseIterable, Identifiable {
     case storage = "Storage Map"
     case systemData = "System Data"
     case developer = "Developer Cleanup"
+    case artifacts = "Project Artifacts"
     case oldFiles = "Old Files"
     case applications = "Applications"
     case startup = "Startup Items"
+    case orphanedData = "Leftover App Data"
 
     var id: String { rawValue }
 
     var icon: String {
         switch self {
         case .overview: "sparkles"
+        case .health: "heart.text.square"
         case .optimize: "wand.and.stars.inverse"
         case .memory: "memorychip"
         case .cleanup: "wand.and.stars"
@@ -27,9 +31,11 @@ enum SidebarDestination: String, CaseIterable, Identifiable {
         case .storage: "chart.pie"
         case .systemData: "internaldrive"
         case .developer: "hammer"
+        case .artifacts: "shippingbox.and.arrow.backward"
         case .oldFiles: "clock.arrow.circlepath"
         case .applications: "square.grid.2x2"
         case .startup: "bolt.circle"
+        case .orphanedData: "tray.full"
         }
     }
 }
@@ -128,6 +134,8 @@ enum ScanState: Equatable {
     case finished
     case cleaning
     case failed(String)
+    /// Stopped by the user; results from an earlier scan, if any, are kept.
+    case cancelled
 }
 
 enum ModuleState: Equatable {
@@ -135,6 +143,8 @@ enum ModuleState: Equatable {
     case loading
     case ready
     case failed(String)
+    /// Stopped by the user; results from an earlier scan, if any, are kept.
+    case cancelled
 }
 
 struct ApplicationItem: Identifiable, Hashable, Sendable, Codable {

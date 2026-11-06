@@ -7,6 +7,8 @@ struct ScanReport<Item: Codable & Sendable>: Codable, Sendable {
     var deniedPaths: [String]
     /// A cooperative deadline preserves verified results instead of discarding the entire scan.
     var incomplete: Bool = false
+    /// Locations whose worker gave no answer in time (for example, an unanswered macOS access prompt).
+    var unansweredPaths: [String]? = nil
 
     func warning(purpose: String) -> String? {
         var parts: [String] = []
@@ -57,12 +59,13 @@ final class DeniedFolders {
 }
 
 enum AccessWarning {
-    /// Tells the user which folders macOS refused and how to allow them; nil when nothing was denied.
+    /// A read denial does not prove that a privacy grant is missing.
     static func denied(_ locations: [String], purpose: String) -> String? {
         guard !locations.isEmpty else { return nil }
-        let names = locations.map { ($0 as NSString).lastPathComponent }
+        let names = Array(Set(locations)).sorted()
         let shown = names.prefix(4).joined(separator: ", ") + (names.count > 4 ? " and \(names.count - 4) more" : "")
-        return "macOS denied access to \(shown), so \(names.count == 1 ? "it was" : "they were") not fully \(purpose). "
-            + "Turn on Full Disk Access for Mac Polish, or allow the folder in Privacy & Security → Files & Folders, then try again."
+        return "Some content could not be \(purpose): \(shown). Readable results are still shown. "
+            + "This does not mean Full Disk Access is off. Protected files, ownership or folder permissions can still block access. "
+            + "If access has not been granted to this copy of Mac Polish, review Full Disk Access and Files & Folders in Privacy & Security."
     }
 }

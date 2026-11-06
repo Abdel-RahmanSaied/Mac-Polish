@@ -11,6 +11,7 @@ struct ApplicationsView: View {
                 subtitle: "Inspect application size, versions, and related leftover files.",
                 buttonTitle: "Refresh",
                 isBusy: model.applicationState == .loading,
+                onCancel: { model.cancelApplications() },
                 action: { model.loadApplications(force: true) }
             )
 
@@ -18,29 +19,27 @@ struct ApplicationsView: View {
         }
         .searchable(text: $model.applicationSearchText, placement: .toolbar, prompt: "Search applications")
         .task { model.loadApplications() }
-        .alert("Uninstall selected applications?", isPresented: $model.confirmsApplicationRemoval) {
-            Button("Cancel", role: .cancel) {}
-            Button("Move to Trash", role: .destructive) { model.removeSelectedApplications() }
-        } message: {
-            Text("The selected apps and detected user-library leftovers will be moved to Trash. System apps are protected. Apps marked as needing an administrator can be removed in Finder.")
-        }
+        .cleanupConfirmation($model.applicationConfirmation, onConfirm: { _ in model.removeSelectedApplications() })
     }
 
     @ViewBuilder
     private var moduleContent: some View {
-        if case .failed(let message) = model.applicationState {
-            ScanFailureView(message: message)
-        } else if model.applicationState == .loading && model.applications.isEmpty {
-            LoadingView(title: "Inspecting installed applications…")
+        let presentation = ModulePresentation.of(model.applicationState, hasResults: !model.applications.isEmpty)
+        if !presentation.showsResults {
+            ModuleStateView(presentation: presentation, subject: "Applications", loadingTitle: "Inspecting installed applications…",
+                            emptyTitle: "No applications found", emptyDetail: "No apps were found in the Applications folders.",
+                            start: { model.loadApplications(force: true) }, onReviewPermissions: { model.access.presented = true })
         } else if filteredApplications.isEmpty {
+            ModuleNotice(presentation: presentation)
             ContentUnavailableView("No applications found", systemImage: "square.grid.2x2", description: Text("Try refreshing the application scan."))
         } else {
+            ModuleNotice(presentation: presentation)
             List(filteredApplications) { application in
                 HStack(spacing: 14) {
                     Toggle("", isOn: selectionBinding(for: application))
                         .labelsHidden()
                         .disabled(!application.canRemove || application.removalNote != nil)
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: application.url.path))
+                    Image(nsImage: AppIconCache.icon(for: application.url))
                         .resizable()
                         .scaledToFit()
                         .frame(width: 42, height: 42)
@@ -61,6 +60,7 @@ struct ApplicationsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                        ApplicationInsightSlot(model: model.appInsights, url: application.url)
                         if !application.leftoverURLs.isEmpty {
                             Text("\(application.leftoverURLs.count) related item(s) · \(application.leftoverSize.formattedBytes)")
                                 .font(.caption)
@@ -84,10 +84,13 @@ struct ApplicationsView: View {
             .disabled(model.applicationState == .loading)
 
             HStack {
-                Text("\(model.applications.count) apps · \(model.selectedApplicationsSize.formattedBytes) selected")
+                Text("\(model.applications.count) apps · \(selectedApplications.count) selected (\(model.selectedApplicationsSize.formattedBytes))"
+                     + (hiddenSelectionCount > 0 ? " · \(hiddenSelectionCount) hidden by search" : ""))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Uninstall Selected", role: .destructive) { model.confirmsApplicationRemoval = true }
+                Button("Uninstall Selected…", role: .destructive) {
+                    model.applicationConfirmation = .forApplications(selectedApplications, hiddenBySearch: hiddenSelectionCount)
+                }
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
                     .disabled(!model.applications.contains(where: \.isSelected) || model.applicationState == .loading)
@@ -105,11 +108,45 @@ struct ApplicationsView: View {
         }
     }
 
+    private var selectedApplications: [ApplicationItem] { model.applications.filter(\.isSelected) }
+
+    private var hiddenSelectionCount: Int {
+        let visible = Set(filteredApplications.map(\.id))
+        return selectedApplications.filter { !visible.contains($0.id) }.count
+    }
+
+    /// The row value comes from the current model list, so reading it is O(1) instead of searching per row.
     private func selectionBinding(for application: ApplicationItem) -> Binding<Bool> {
         Binding(
-            get: { model.applications.first(where: { $0.id == application.id })?.isSelected ?? false },
+            get: { application.isSelected },
             set: { model.setApplicationSelection($0, id: application.id) }
         )
+    }
+}
+
+/// App icons are decoded once per path rather than on every list update.
+@MainActor
+enum AppIconCache {
+    private static let cache = NSCache<NSString, NSImage>()
+    static func icon(for url: URL) -> NSImage {
+        if let cached = cache.object(forKey: url.path as NSString) { return cached }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        cache.setObject(icon, forKey: url.path as NSString)
+        return icon
+    }
+}
+
+/// A module that has not run yet (for example while scan permissions are being reviewed) is not "empty".
+struct NotScannedView: View {
+    let subject: String
+    let start: () -> Void
+    var body: some View {
+        VStack(spacing: 14) {
+            ContentUnavailableView("\(subject) not scanned yet", systemImage: "magnifyingglass",
+                                   description: Text("The scan starts after scan permissions are reviewed, or when you start it."))
+            Button("Start Scan", action: start).buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -123,6 +160,7 @@ struct DuplicatesView: View {
                 subtitle: "Byte-accurate SHA-256 matching across personal folders.",
                 buttonTitle: "Scan Again",
                 isBusy: model.duplicateState == .loading,
+                onCancel: { model.cancelDuplicates() },
                 action: { model.findDuplicates(force: true) }
             )
 
@@ -137,13 +175,13 @@ struct DuplicatesView: View {
                 .padding(.horizontal, 30).padding(.bottom, 12)
             }
 
-            if case .failed(let message) = model.duplicateState {
-            ScanFailureView(message: message)
-        } else if model.duplicateState == .loading && model.duplicateFiles.isEmpty {
-                LoadingView(title: "Hashing possible duplicates…")
-            } else if model.duplicateGroups.isEmpty {
-                ContentUnavailableView("No duplicates found", systemImage: "doc.on.doc", description: Text("Files smaller than 1 MB are skipped."))
+            let presentation = ModulePresentation.of(model.duplicateState, hasResults: !model.duplicateGroups.isEmpty)
+            if !presentation.showsResults {
+                ModuleStateView(presentation: presentation, subject: "Duplicates", loadingTitle: "Hashing possible duplicates…",
+                                emptyTitle: "No duplicates found", emptyDetail: "Files smaller than 1 MB are skipped.",
+                                start: { model.findDuplicates(force: true) }, onReviewPermissions: { model.access.presented = true })
             } else {
+                ModuleNotice(presentation: presentation)
                 List {
                     ForEach(model.duplicateGroups) { group in
                         Section {
@@ -201,56 +239,54 @@ struct DuplicatesView: View {
                 .background(.purple.opacity(0.06))
 
                 HStack {
-                    Text("\(model.duplicateFiles.filter(\.isSelected).count) selected · \(model.selectedDuplicateSize.formattedBytes)")
+                    Text("\(model.duplicateRemovalPlan.count) to move · \(model.selectedDuplicateSize.formattedBytes)")
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Move Selected to Trash", role: .destructive) { model.confirmsDuplicateRemoval = true }
+                    Button("Move Selected to Trash…", role: .destructive) { model.requestDuplicateRemoval() }
                         .buttonStyle(.borderedProminent)
                         .tint(.red)
-                        .disabled(!model.duplicateFiles.contains(where: \.isSelected) || model.duplicateState == .loading)
+                        .disabled(model.duplicateRemovalPlan.isEmpty || model.duplicateState == .loading)
                 }
                 .padding(20)
                 .background(.bar)
             }
         }
         .task { model.findDuplicates() }
-        .alert("Remove selected duplicates?", isPresented: $model.confirmsDuplicateRemoval) {
-            Button("Cancel", role: .cancel) {}
-            Button("Move to Trash", role: .destructive) { model.removeSelectedDuplicates() }
-        } message: {
-            Text("\(model.duplicateFiles.filter(\.isSelected).count) selected files (\(model.selectedDuplicateSize.formattedBytes)) will be moved to Trash. Disk space is estimated; shared blocks and Trash can delay space recovery. At least one copy per group is kept. Remove All keeps the first path alphabetically; cancel to review or change the selection.")
-        }
+        .cleanupConfirmation($model.duplicateConfirmation, onConfirm: { _ in model.removeSelectedDuplicates() },
+                             onCancel: { model.cancelDuplicateRemoval() })
     }
 
     private func duplicateBinding(for file: DuplicateFile) -> Binding<Bool> {
         Binding(
-            get: { model.duplicateFiles.first(where: { $0.id == file.id })?.isSelected ?? false },
+            get: { file.isSelected },
             set: { model.setDuplicateSelection($0, id: file.id) }
         )
     }
 
     private func selectExtras(in group: DuplicateGroup) {
-        let keeper = group.files.sorted { $0.url.path < $1.url.path }.first?.id
+        let keeper = group.files.first?.id   // groups are sorted by path
         for file in group.files { model.setDuplicateSelection(file.id != keeper, id: file.id) }
     }
 }
 
 struct StorageMapView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var path: [String] = []
-    @State private var inspection: FolderInspectionTarget?
+    @ViewState private var path: [String] = []
+    @ViewState private var inspection: FolderInspectionTarget?
 
     var body: some View {
         VStack(spacing: 0) {
             moduleHeader(
                 title: "Storage Map",
-                subtitle: "Accessible files on your startup Data volume, including hidden files and app contents.",
+                subtitle: "Every readable file on the startup disk, hidden files, app contents and the sealed macOS volume included.",
                 buttonTitle: model.storageState == .loading ? "Analyzing…" : "Analyze Again",
                 isBusy: model.storageState == .loading,
+                onCancel: { model.cancelStorage() },
                 action: { path = []; model.analyzeStorage(force: true) }
             )
             HStack {
                 Button("Choose Disk or Folder…") {
+                    guard model.access.authorizeScan() else { return }
                     let panel = NSOpenPanel()
                     panel.canChooseDirectories = true
                     panel.canChooseFiles = false
@@ -272,13 +308,19 @@ struct StorageMapView: View {
             }
             if case .failed(let message) = model.storageState, model.diskMap == nil {
                 ScanFailureView(message: message)
+            } else if model.storageState == .cancelled, model.diskMap == nil {
+                ModuleStateView(presentation: .cancelled, subject: "Storage Map", start: { model.analyzeStorage(force: true) })
             } else if let report = model.diskMap {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         if case .failed(let message) = model.storageState {
                             Label(message, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange)
+                        } else if model.storageState == .cancelled {
+                            Label("The latest analysis was cancelled. This map is from the previous analysis.", systemImage: "stop.circle")
+                                .font(.callout).foregroundStyle(.secondary)
                         }
                         DiskSummaryCard(report: report)
+                        DiskInsightsPanel(report: report)
                         DiskBrowser(root: report.tree.root, path: $path)
                     }
                     .padding(.horizontal, 30).padding(.bottom, 30)
@@ -424,9 +466,10 @@ private struct DiskSummaryCard: View {
 
 /// Folder-by-folder view of the map, largest first.
 private struct DiskBrowser: View {
+    @EnvironmentObject private var model: AppModel
     let root: DiskNode
     @Binding var path: [String]
-    @State private var inspection: FolderInspectionTarget?
+    @ViewState private var inspection: FolderInspectionTarget?
 
     private var current: DiskNode {
         path.reduce(root) { node, name in node.children.first { $0.name == name && $0.kind == .folder } ?? node }
@@ -451,6 +494,7 @@ private struct DiskBrowser: View {
                     Button("Back") { path.removeLast() }
                 }
                 Button("Inspect every item…") {
+                    guard model.access.authorizeScan() else { return }
                     inspection = FolderInspectionTarget(url: DiskMapService.revealURL(path))
                 }
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([DiskMapService.revealURL(path)]) }
@@ -559,6 +603,8 @@ struct StartupItemsView: View {
             ScanFailureView(message: message)
         } else if model.startupState == .loading && model.startupEntries.isEmpty {
                 LoadingView(title: "Reading launch services…")
+            } else if model.startupState == .idle {
+                NotScannedView(subject: "Startup items") { model.loadStartupItems(force: true) }
             } else if model.startupEntries.isEmpty {
                 ContentUnavailableView("No startup items found", systemImage: "bolt.circle", description: Text("No launch agents were detected in standard locations."))
             } else {
@@ -608,7 +654,8 @@ private struct LoadingView: View {
 }
 
 @MainActor
-private func moduleHeader(title: String, subtitle: String, buttonTitle: String, isBusy: Bool = false, action: @escaping () -> Void) -> some View {
+private func moduleHeader(title: String, subtitle: String, buttonTitle: String, isBusy: Bool = false,
+                          onCancel: (() -> Void)? = nil, action: @escaping () -> Void) -> some View {
     HStack {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
@@ -617,9 +664,14 @@ private func moduleHeader(title: String, subtitle: String, buttonTitle: String, 
                 .foregroundStyle(.secondary)
         }
         Spacer()
-        Button(buttonTitle, action: action)
-            .buttonStyle(.borderedProminent)
-            .disabled(isBusy)
+        if isBusy, let onCancel {
+            ProgressView().controlSize(.small)
+            Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+        } else {
+            Button(buttonTitle, action: action)
+                .buttonStyle(.borderedProminent)
+                .disabled(isBusy)
+        }
     }
     .padding(30)
 }
@@ -647,12 +699,12 @@ private struct FolderInspectionTarget: Identifiable {
 private struct FolderInspectionView: View {
     let start: URL
     @Environment(\.dismiss) private var dismiss
-    @State private var current: URL?
-    @State private var result: DiskTreeResult?
-    @State private var failure: String?
-    @State private var loading = false
-    @State private var visibleCount = 200
-    @State private var requestID = UUID()
+    @ViewState private var current: URL?
+    @ViewState private var result: DiskTreeResult?
+    @ViewState private var failure: String?
+    @ViewState private var loading = false
+    @ViewState private var visibleCount = 200
+    @ViewState private var requestID = UUID()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

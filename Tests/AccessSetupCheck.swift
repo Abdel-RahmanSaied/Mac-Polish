@@ -17,8 +17,9 @@ enum AccessSetupCheck {
         let nested = NSError(domain: "Fixture", code: 1, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT))])
         precondition(FolderAccessCheck.classify(nested) == .missing)
         let locations = FolderAccessCheck.locations(home: root)
-        precondition(locations.count == 16 && Set(locations.map { $0.1.path }).count == 16)
-        precondition(locations.allSatisfy { $0.1.path.hasPrefix(root.path + "/") })
+        precondition(locations.count > 16 && Set(locations.map { $0.1.path }).count == locations.count)
+        precondition(locations.contains { $0.1.path == root.appending(path: "Documents").path })
+        precondition(locations.contains { $0.1.path == DiskMapService.dataRoot })
         let suite = "MacPolish-access-test-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -34,6 +35,9 @@ enum AccessSetupCheck {
         access.results = [FolderAccessResult(name: "fixture", url: root, status: .readable)]
         precondition(!access.hasIncompleteAccess)
         access.settingsPresented = true
+        access.results = FolderAccessCheck.locations().map { FolderAccessResult(name: $0.0, url: $0.1, status: .readable) }
+        access.checkedAt = Date()
+        if access.fullDiskAccess == nil { access.fullDiskAccess = .unknown }
         access.finish()
         precondition(!access.presented && !access.settingsPresented)
         let returning = AccessSetupModel(defaults: defaults)

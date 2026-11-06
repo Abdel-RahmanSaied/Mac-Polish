@@ -3,6 +3,10 @@ import Foundation
 struct DiskScanFailure: Error, Sendable {
     let message: String
     var timedOut = false
+    /// The user cancelled; not an error to report as a failure.
+    var cancelled = false
+
+    static let cancelledByUser = DiskScanFailure(message: "Cancelled.", cancelled: true)
 }
 
 /// Items from the sections that finished, the sections that did not, and the sections macOS denied.
@@ -11,10 +15,11 @@ struct DiskScanOutcome: Sendable {
     let incomplete: [DiskScanner.Section]
     /// Sections that answered but could not open some or all of their folders.
     var denied: [DiskScanner.Section] = []
+    var deniedPaths: [String] = []
 
     var warning: String? {
         var parts: [String] = []
-        if let denial = AccessWarning.denied(denied.map(\.displayName), purpose: "scanned") { parts.append(denial) }
+        if let denial = AccessWarning.denied(deniedPaths.isEmpty ? denied.map(\.displayName) : deniedPaths, purpose: "scanned") { parts.append(denial) }
         if !incomplete.isEmpty {
             let names = incomplete.map(\.displayName).joined(separator: ", ")
             parts.append("Some locations could not be read: \(names). Results from the other locations are shown. "
@@ -40,22 +45,26 @@ enum DiskScanService {
     /// Scans each section in its own worker, concurrently, so one stalled location cannot discard the rest.
     /// Fails only when no section could be read.
     static func scan(includeLargeFiles: Bool = true, timeout: TimeInterval = 60,
-                     reader: SectionReader? = nil) -> Result<DiskScanOutcome, DiskScanFailure> {
+                     reader: SectionReader? = nil, cancellation: ScanCancellation? = nil) -> Result<DiskScanOutcome, DiskScanFailure> {
         let read = reader ?? { section in
-            Self.readValue(ScanReport<ScanItem>.self, mode: "basic", arguments: ["--section", section.rawValue], timeout: timeout)
+            Self.readValue(ScanReport<ScanItem>.self, mode: "basic", arguments: ["--section", section.rawValue], timeout: timeout,
+                           cancellation: cancellation)
         }
         let sections = DiskScanner.Section.allCases.filter { includeLargeFiles || !$0.isLargeFileFolder }
         let results = concurrentMap(sections, read)
+        if cancellation?.isCancelled == true { return .failure(.cancelledByUser) }
 
         var items: [ScanItem] = []
         var incomplete: [DiskScanner.Section] = []
         var denied: [DiskScanner.Section] = []
+        var deniedPaths: [String] = []
         var failures: [DiskScanFailure] = []
         for (section, result) in zip(sections, results) {
             switch result {
             case .success(let found):
                 items += found.items
                 if !found.deniedPaths.isEmpty { denied.append(section) }
+                deniedPaths += found.deniedPaths
             case .failure(let failure): incomplete.append(section); failures.append(failure)
             }
         }
@@ -63,7 +72,8 @@ enum DiskScanService {
             return .failure(failures.first(where: \.timedOut) ?? failures.first
                 ?? DiskScanFailure(message: "Reading files could not finish. Review scan permissions and try again."))
         }
-        return .success(DiskScanOutcome(items: DiskScanner.sorted(items), incomplete: incomplete, denied: denied))
+        return .success(DiskScanOutcome(items: DiskScanner.sorted(items), incomplete: incomplete, denied: denied,
+                                       deniedPaths: Array(Set(deniedPaths)).sorted()))
     }
 
     /// Runs blocking work for every input at once on GCD and returns results in input order.
@@ -82,18 +92,19 @@ enum DiskScanService {
         return results.values
     }
 
-    static func read<Item: Decodable & Sendable>(_ type: Item.Type, mode: String,
-                                                arguments: [String] = [], timeout: TimeInterval = 60) -> Result<[Item], DiskScanFailure> {
-        readValue([Item].self, mode: mode, arguments: arguments, timeout: timeout)
+    static func read<Item: Decodable & Sendable>(_ type: Item.Type, mode: String, arguments: [String] = [],
+                                                timeout: TimeInterval = 60, cancellation: ScanCancellation? = nil) -> Result<[Item], DiskScanFailure> {
+        readValue([Item].self, mode: mode, arguments: arguments, timeout: timeout, cancellation: cancellation)
     }
 
     /// Runs the read-only worker in `mode` and decodes the one JSON value it writes.
-    static func readValue<Value: Decodable & Sendable>(_ type: Value.Type, mode: String,
-                                                       arguments: [String] = [], timeout: TimeInterval = 60) -> Result<Value, DiskScanFailure> {
+    static func readValue<Value: Decodable & Sendable>(_ type: Value.Type, mode: String, arguments: [String] = [],
+                                                       timeout: TimeInterval = 60, cancellation: ScanCancellation? = nil) -> Result<Value, DiskScanFailure> {
         guard let executable = Bundle.main.executableURL?.path else {
             return .failure(DiskScanFailure(message: "The scan worker is unavailable. Reopen the app and try again."))
         }
-        let output = SystemDataScanner.run(executable, ["--scan-worker", mode] + arguments, timeout: timeout)
+        let output = SystemDataScanner.run(executable, ["--scan-worker", mode] + arguments, timeout: timeout, cancellation: cancellation)
+        if output.status == SystemDataScanner.cancelledStatus { return .failure(.cancelledByUser) }
         guard output.status == 0, let data = output.output.data(using: .utf8),
               let value = try? JSONDecoder().decode(Value.self, from: data) else {
             return .failure(DiskScanFailure(message: output.status == -1
